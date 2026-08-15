@@ -65,11 +65,15 @@ const api = {
   getKnowledgeCardContent: (filePath: string) => ipcRenderer.invoke('knowledge:cardContent', filePath),
   getDailyNotes: () => ipcRenderer.invoke('knowledge:dailyNotes'),
   getDailyNoteContent: (date: string) => ipcRenderer.invoke('knowledge:dailyNoteContent', date),
-  getReviewCards: (count?: number) => ipcRenderer.invoke('knowledge:reviewCards', count || 3),
+  getReviewQueue: (count?: number) => ipcRenderer.invoke('knowledge:reviewQueue', count),
+  markReview: (cardPath: string, result: string) => ipcRenderer.invoke('knowledge:reviewDone', cardPath, result),
+  getCardQuestions: (cardPath: string) => ipcRenderer.invoke('knowledge:cardQuestions', cardPath),
 
   // Test Builder (组卷)
   selectTestQuestions: (params?: any) => ipcRenderer.invoke('test:selectQuestions', params || {}),
   generateTestPdf: (questionIds: string[], options?: any) => ipcRenderer.invoke('test:generatePdf', questionIds, options || {}),
+  selectFromReviewQueue: (count?: number) => ipcRenderer.invoke('test:selectFromReviewQueue', count),
+  markTestAnswers: (wrongIds: string[]) => ipcRenderer.invoke('test:markAnswers', wrongIds),
 
   // Events from main
   onLogError: (callback: (data: any) => void) => {
@@ -87,6 +91,10 @@ const api = {
   onAutoInductComplete: (callback: (data: { date: string; success: boolean }) => void) => {
     ipcRenderer.on('knowledge:autoInductComplete', (_event, data) => callback(data))
     return () => ipcRenderer.removeAllListeners('knowledge:autoInductComplete')
+  },
+  onPdfProgress: (callback: (data: { stage: string; done?: number; total?: number; ts: number }) => void) => {
+    ipcRenderer.on('pdf:progress', (_event, data) => callback(data))
+    return () => ipcRenderer.removeAllListeners('pdf:progress')
   },
 
   // Open external

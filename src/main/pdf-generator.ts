@@ -67,6 +67,9 @@ export function fetchQuestionsForTest(
       FROM questions
       WHERE status = 'confirmed' AND id IN (${placeholders})
     `).all(...ids) as QuestionData[]
+    // 按传入的选题顺序重排（组卷顺序 = 用户在界面调整后的顺序）
+    const orderMap = new Map(ids.map((id, i) => [id, i]))
+    rows.sort((a, b) => (orderMap.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (orderMap.get(b.id) ?? Number.MAX_SAFE_INTEGER))
     return rows
   }
 
@@ -165,14 +168,17 @@ async function downloadImageAsBase64(url: string, timeout = 10000): Promise<stri
   }
 }
 
-async function downloadImagesForQuestions(questions: QuestionData[]): Promise<Map<string, string>> {
+async function downloadImagesForQuestions(
+  questions: QuestionData[],
+  onProgress?: (done: number, total: number) => void
+): Promise<Map<string, string>> {
   const cache = new Map<string, string>()
 
   // Collect unique image URLs
   const urls = new Set<string>()
   for (const q of questions) {
     if (q.image_url) urls.add(q.image_url)
-	    if (q.graphic_image_path) urls.add(q.graphic_image_path)
+    if (q.graphic_image_path) urls.add(q.graphic_image_path)
   }
 
   // Download in parallel with concurrency limit
@@ -202,6 +208,7 @@ async function downloadImagesForQuestions(questions: QuestionData[]): Promise<Ma
     for (const { url, base64 } of results) {
       if (base64) cache.set(url, base64)
     }
+    onProgress?.(Math.min(i + batch.length, urlList.length), urlList.length)
   }
 
   return cache
@@ -681,7 +688,8 @@ ${answerSheetHtml}
 
 export async function generatePdf(
   questionIds: string[],
-  options: Partial<PdfOptions> = {}
+  options: Partial<PdfOptions> = {},
+  onProgress?: (stage: string, done?: number, total?: number) => void
 ): Promise<{ success: boolean; filePath?: string; error?: string; imageErrors: string[] }> {
   const opts = { ...DEFAULT_OPTIONS, ...options }
   const imageErrors: string[] = []
@@ -692,6 +700,7 @@ export async function generatePdf(
     if (questions.length === 0) {
       return { success: false, error: '未找到符合条件的错题', imageErrors: [] }
     }
+    onProgress?.('preparing', 0, questions.length)
 
     // 2. Fetch groups for any questions that have group_id
     const groupIds = new Set<string>()
@@ -714,8 +723,11 @@ export async function generatePdf(
     }
 
     logger.info('pdf_gen', 'download_start', `开始下载 ${allImageUrls.size} 张图片`)
+    onProgress?.('download', 0, allImageUrls.size)
 
-    const imageCache = await downloadImagesForQuestions(allQuestions)
+    const imageCache = await downloadImagesForQuestions(allQuestions, (done, total) => {
+      onProgress?.('download', done, total)
+    })
 
     // Track missing images
     for (const q of allQuestions) {
@@ -727,6 +739,7 @@ export async function generatePdf(
 
     // 4. Build HTML
     const html = buildFullHtml(questions, groups, imageCache, opts)
+    onProgress?.('render', 1, 1)
 
     // 5. Write HTML to temp file (data URL hits size limit with embedded images)
     const tmpDir = require('os').tmpdir()

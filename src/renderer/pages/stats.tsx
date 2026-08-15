@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Typography, Card, Row, Col, Statistic, Table, Tag, Select, Space, Button, App, Spin, Progress, Empty, Segmented, DatePicker } from 'antd'
 import {
   FileTextOutlined, FireOutlined,
   CalendarOutlined, ReloadOutlined, ArrowUpOutlined, ArrowDownOutlined,
-  BulbOutlined, WarningOutlined, PlusCircleOutlined, ClockCircleOutlined
+  BulbOutlined, WarningOutlined, PlusCircleOutlined, ClockCircleOutlined, FilePdfOutlined
 } from '@ant-design/icons'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -26,6 +27,7 @@ interface StatsData {
 }
 
 export function StatsPage() {
+  const navigate = useNavigate()
   const [stats, setStats] = useState<StatsData | null>(null)
   const [loading, setLoading] = useState(false)
   const [timeRange, setTimeRange] = useState<number | 'custom'>(30)
@@ -155,17 +157,26 @@ export function StatsPage() {
     },
     { title: '时间', dataIndex: 'created_at', width: 100, render: (v: string) => v?.slice(0, 10) },
     {
-      title: '操作', width: 70,
-      render: (_: any, r: any) => <Button size="small" type="link" onClick={async () => {
-        const vault = (await window.api.getConfig('obsidian_vault') || '').replace(/\/+$/, '')
-        if (r.obsidian_path && vault) {
-          const vaultName = vault.split('/').pop() || 'vault'
-          const uri = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(r.obsidian_path)}`
-          window.api.openExternal(uri)
-        } else {
-          message.info('未找到 Obsidian 文件路径')
-        }
-      }}>打开</Button>
+      title: '操作', width: 110,
+      render: (_: any, r: any) => (
+        <Space size={0}>
+          <Button size="small" type="link" onClick={async () => {
+            const vault = (await window.api.getConfig('obsidian_vault') || '').replace(/\/+$/, '')
+            if (r.obsidian_path && vault) {
+              const vaultName = vault.split('/').pop() || 'vault'
+              const uri = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(r.obsidian_path)}`
+              window.api.openExternal(uri)
+            } else {
+              message.info('未找到 Obsidian 文件路径')
+            }
+          }}>打开</Button>
+          {/* 学习闭环：薄弱题型一键组卷重做 */}
+          <Button size="small" type="link" icon={<FilePdfOutlined />}
+            onClick={() => navigate(`/test-builder?level1=${encodeURIComponent(r.level1)}&level2=${encodeURIComponent(r.level2 || '')}&level3=${encodeURIComponent(r.level3 || '')}`)}>
+            组卷
+          </Button>
+        </Space>
+      )
     }
   ]
 

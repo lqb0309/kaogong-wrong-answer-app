@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Typography, Button, App, Card, Tag, Space, Checkbox, Image, Badge, Progress, Popconfirm, Empty, Row, Col, Tooltip, Statistic, Tabs } from 'antd'
+import { Typography, Button, App, Card, Tag, Space, Checkbox, Image, Badge, Progress, Popconfirm, Empty, Row, Col, Tooltip, Statistic, Tabs, Modal } from 'antd'
 import {
   PlusOutlined, ThunderboltOutlined, ClockCircleOutlined, DeleteOutlined,
   CheckOutlined, CloseOutlined, LoadingOutlined, EditOutlined,
-  InboxOutlined, FireOutlined, FileImageOutlined, CheckSquareOutlined, SyncOutlined
+  InboxOutlined, FireOutlined, FileImageOutlined, CheckSquareOutlined, SyncOutlined, ArrowRightOutlined
 } from '@ant-design/icons'
 import { usePendingStore } from '@/stores/pending'
 import { useClassifyJobsStore } from '@/stores/classify-jobs'
+import { useSettingsStore } from '@/stores/settings'
 import { CanvasCrop } from '@/components/canvas-crop'
 import { PageHeader } from '@/components/page-header'
 import { SetupBanner } from '@/components/setup-banner'
@@ -47,12 +48,25 @@ export function HomePage() {
   const [overview, setOverview] = useState<{ pendingCount: number; classifiedCount: number; confirmedCount: number; todayCount: number; streak: number; retryQueueSize: number } | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'classified'>('all')
+  const [dailyNoteReady, setDailyNoteReady] = useState(false)
+  const [reviewedToday, setReviewedToday] = useState(0)
+  const { get: getSetting } = useSettingsStore()
 
   const refreshOverview = useCallback(async () => {
     try {
       const data = await window.api.getAppOverview()
       setOverview(data)
       setPendingCount(data.pendingCount + data.classifiedCount)
+    } catch { /* ignore */ }
+    // 今日归纳状态 + 今日复习进度
+    try {
+      const notes = await window.api.getDailyNotes()
+      const today = new Date().toISOString().slice(0, 10)
+      setDailyNoteReady(!!notes.notes?.some((n: any) => n.date === today))
+    } catch { /* ignore */ }
+    try {
+      const qr = await window.api.getReviewQueue()
+      setReviewedToday(qr.reviewedToday?.length || 0)
     } catch { /* ignore */ }
   }, [])
 
@@ -120,7 +134,7 @@ export function HomePage() {
     return () => unsub?.()
   }, [setClassifyJob])
 
-  const loadLibrary = async () => {
+  const loadLibrary = async (): Promise<LibItem[]> => {
     try {
       const result = await window.api.getQuestions({ page: 1, pageSize: 500, status: 'all' })
       const filtered = (result.items || []).filter((q: any) => q.status !== 'confirmed')
@@ -140,9 +154,11 @@ export function HomePage() {
       setLibrary(items)
       // 同步待确认角标（pending + classified）
       window.api.getPendingCount().then(setPendingCount)
+      return items
     } catch (err: any) {
       console.error('loadLibrary error:', err)
       message.error(`加载成品库失败: ${err.message}`)
+      return []
     }
   }
 
@@ -155,6 +171,7 @@ export function HomePage() {
     const results = await window.api.uploadImages(unique.map(fp => ({ path: fp, rotation: 0 })))
     let ok = 0
     let dupCount = 0
+    const importedIds: string[] = []
     for (const res of results) {
       if (res?.duplicate) { dupCount++; continue }
       if (res?.success) {
@@ -165,16 +182,27 @@ export function HomePage() {
           traceId: res.traceId, fileName: (res.filePath || 'unknown').split('/').pop() || 'unknown', status: 'pending',
           localAbsPath: res.localAbsPath, fileHash: res.fileHash
         })
+        importedIds.push(qId)
         ok++
       }
     }
     setImporting(false)
-    loadLibrary()
+    const freshItems = await loadLibrary()
+    refreshOverview()
     const failCount = results.length - ok - dupCount
     const parts: string[] = [`已导入 ${ok} 张图片`]
     if (dupCount > 0) parts.push(`跳过 ${dupCount} 张重复图片`)
     if (failCount > 0) parts.push(`${failCount} 张失败`)
     message[ok > 0 ? 'success' : failCount > 0 ? 'error' : 'warning'](parts.join('，'))
+
+    // 流程接力：开启「导入后自动分类」时，新导入的图直接进 AI 分类
+    if (ok > 0 && getSetting('auto_classify_after_import', 'false') === 'true') {
+      const fresh = freshItems.filter((q) => importedIds.includes(q.id) && q.status === 'pending')
+      if (fresh.length > 0) {
+        message.info(`开始自动分类 ${fresh.length} 张图片...`)
+        await classifyItems(fresh)
+      }
+    }
   }
 
   const handleImport = async () => {
@@ -235,6 +263,7 @@ export function HomePage() {
     clearClassifyJobs()
     const concurrency = 3
     const queue = [...items]
+    let doneCount = 0
 
     const worker = async () => {
       while (queue.length > 0) {
@@ -244,6 +273,7 @@ export function HomePage() {
         try {
           const aiResult = await window.api.classifyImage(item.imageUrl, item.traceId)
           if (aiResult.success) {
+            doneCount++
             setLibrary((prev) => prev.filter((q) => q.id !== item.id))
             // 持久化 AI 结果 + 状态，重启后待确认队列可恢复
             await window.api.updateQuestion(item.id, {
@@ -283,8 +313,21 @@ export function HomePage() {
     await Promise.all(Array.from({ length: concurrency }, () => worker()))
     setClassifying(false)
     setSelected([])
-    message.success('AI 分类完成')
-  }, [addItems, message, setClassifyJob, clearClassifyJobs, setClassifying, setSelected])
+    refreshOverview()
+    if (doneCount > 0) {
+      message.success(`AI 分类完成：${doneCount} 道`)
+      // 流程接力：提示去确认（学习闭环第②步）
+      Modal.confirm({
+        title: `${doneCount} 道错题已分类完成`,
+        content: '已进入「待确认」队列，是否现在去逐题确认？',
+        okText: '去确认',
+        cancelText: '稍后',
+        onOk: () => navigate('/pending')
+      })
+    } else {
+      message.error('分类失败，可点击任务条上的「重试」')
+    }
+  }, [addItems, message, setClassifyJob, clearClassifyJobs, setClassifying, setSelected, refreshOverview, navigate])
 
   const handleBatchClassify = useCallback(async () => {
     const toClassify = library.filter((q) => selected.includes(q.id) && q.status === 'pending')
@@ -344,6 +387,8 @@ export function HomePage() {
     setSelected((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id])
   }
 
+  const reviewTarget = Number(getSetting('review_daily_count', '5')) || 5
+
   return (
     <div>
       <PageHeader
@@ -364,6 +409,19 @@ export function HomePage() {
       />
 
       <SetupBanner />
+
+      {/* 学习闭环流程状态条：收集 → 确认 → 归纳 → 复习 */}
+      <Card size="small" style={{ marginBottom: 12, background: '#fafafa', border: '1px solid #f0f0f0' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 2 }}>
+          <FlowStep n={1} label="收集" value={`待分类 ${pendingItems.length}`} active={pendingItems.length > 0} color="#1677ff" onClick={() => setStatusFilter('pending')} />
+          <ArrowRightOutlined style={{ color: '#ccc', fontSize: 12 }} />
+          <FlowStep n={2} label="确认" value={`待确认 ${pendingCount}`} active={pendingCount > 0} color="#722ed1" onClick={() => navigate('/pending')} />
+          <ArrowRightOutlined style={{ color: '#ccc', fontSize: 12 }} />
+          <FlowStep n={3} label="归纳" value={dailyNoteReady ? '今日笔记 ✅' : '待生成'} active={!dailyNoteReady} color="#52c41a" onClick={() => navigate('/knowledge')} />
+          <ArrowRightOutlined style={{ color: '#ccc', fontSize: 12 }} />
+          <FlowStep n={4} label="复习" value={`${reviewedToday}/${reviewTarget}`} active={reviewedToday < reviewTarget} color="#fa8c16" onClick={() => navigate('/knowledge')} />
+        </div>
+      </Card>
 
       {/* 概览统计（点击卡片可跳转） */}
       <Row gutter={12} style={{ marginBottom: 12 }}>
@@ -555,5 +613,32 @@ export function HomePage() {
         onCancel={() => { setCropTarget(null) }}
       />
     </div>
+  )
+}
+
+// 学习闭环流程步骤（首页状态条）
+function FlowStep({ n, label, value, active, color, onClick }: {
+  n: number
+  label: string
+  value: string
+  active: boolean
+  color: string
+  onClick: () => void
+}) {
+  return (
+    <Tooltip title="点击前往">
+      <Button type="text" size="small" onClick={onClick} style={{ padding: '2px 8px', height: 'auto' }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <span style={{
+            width: 18, height: 18, borderRadius: '50%',
+            background: active ? color : '#d9d9d9',
+            color: '#fff', fontSize: 11, lineHeight: '18px', textAlign: 'center',
+            display: 'inline-block', flexShrink: 0
+          }}>{n}</span>
+          <span style={{ fontWeight: 500, fontSize: 13 }}>{label}</span>
+          <span style={{ color: active ? color : '#999', fontSize: 12 }}>{value}</span>
+        </span>
+      </Button>
+    </Tooltip>
   )
 }

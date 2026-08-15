@@ -42,6 +42,7 @@ interface ElectronApi {  getConfig: (key: string) => Promise<string | undefined>
   getLogTrace: (traceId: string) => Promise<any[]>
   onLogError: (callback: (data: any) => void) => () => void
   onAutoInductComplete: (callback: (data: { date: string; success: boolean }) => void) => () => void
+  onPdfProgress: (callback: (data: { stage: string; done?: number; total?: number; ts: number }) => void) => () => void
   onUploadProgress: (callback: (data: any) => void) => () => void
   onAiProgress: (callback: (data: { traceId: string; stage: string; message: string; ts: number; progress?: number; tokens?: number }) => void) => () => void
   getKnowledgeOverview: (date?: string) => Promise<{
@@ -105,13 +106,17 @@ interface ElectronApi {  getConfig: (key: string) => Promise<string | undefined>
     updatedCards: Array<{ file: string; success: boolean; error?: string }>
     mocUpdates: Array<{ file: string; success: boolean; error?: string }>
   }>
-  getKnowledgeCards: () => Promise<{ success: boolean; error?: string; cards: Array<{ title: string; file_path: string; knowledge_type: string; level1: string; level2: string; level3: string | null }> }>
+  getKnowledgeCards: () => Promise<{ success: boolean; error?: string; cards: Array<{ title: string; file_path: string; knowledge_type: string; level1: string; level2: string; level3: string | null; error_count: number; last_seen: string }> }>
   getKnowledgeCardContent: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string }>
   getDailyNotes: () => Promise<{ success: boolean; error?: string; notes: Array<{ date: string; file_path: string; title: string; total_questions: number; preview: string }> }>
   getDailyNoteContent: (date: string) => Promise<{ success: boolean; content?: string; error?: string }>
-  getReviewCards: (count?: number) => Promise<{ success: boolean; error?: string; cards: Array<{ title: string; file_path: string; knowledge_type: string; level1: string; level2: string; level3: string | null }> }>
+  getReviewQueue: (count?: number) => Promise<{ success: boolean; error?: string; cards: Array<{ title: string; file_path: string; knowledge_type: string; level1: string; level2: string; level3: string | null; error_count: number; last_seen: string; score: number }>; reviewedToday: string[] }>
+  markReview: (cardPath: string, result: string) => Promise<{ success: boolean; error?: string; cardBumped?: boolean }>
+  getCardQuestions: (cardPath: string) => Promise<{ success: boolean; error?: string; questions: any[] }>
   selectTestQuestions: (params?: { ids?: string[]; level1?: string; level2?: string; level3?: string; search?: string; limit?: number; random?: boolean }) => Promise<{ success: boolean; error?: string; questions: any[] }>
   generateTestPdf: (questionIds: string[], options?: { title?: string; showAnswers?: boolean; questionsPerPage?: number; pageSize?: string; includeAnswerSheet?: boolean; imageMode?: 'graphics_only' | 'full' }) => Promise<{ success: boolean; filePath?: string; error?: string; imageErrors: string[] }>
+  selectFromReviewQueue: (count?: number) => Promise<{ success: boolean; error?: string; ids: string[]; cards: any[] }>
+  markTestAnswers: (wrongIds: string[]) => Promise<{ success: boolean; error?: string; updated?: number; cardBumps?: number }>
   openExternal: (path: string) => Promise<void>
   getAppVersion: () => Promise<string>
   reportRendererError: (errorText: string) => Promise<void>

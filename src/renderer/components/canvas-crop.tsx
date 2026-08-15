@@ -88,25 +88,30 @@ export function CanvasCrop({ open, imagePath, onOk, onSkip, onCancel }: Props) {
 
   useEffect(() => { renderCanvas() }, [rotation, crop, drawing, cur])
 
-  const getCanvasPos = (e: React.MouseEvent) => {
+  // 坐标换算并钳制到图片边界（修复拖到边缘导致选区失效的问题）
+  const getCanvasPos = (e: React.MouseEvent | React.PointerEvent) => {
     const c = canvasRef.current!; const r = c.getBoundingClientRect()
     const dw = c.width; const dh = c.height
     // Scale canvas coords to rotated-image-space pixels
     const rotated = rotation === 90 || rotation === 270
     const cw = rotated ? origH.current : origW.current
     const ch = rotated ? origW.current : origH.current
-    return {
-      x: Math.round((e.clientX - r.left) / dw * cw),
-      y: Math.round((e.clientY - r.top) / dh * ch)
-    }
+    let x = Math.round((e.clientX - r.left) / dw * cw)
+    let y = Math.round((e.clientY - r.top) / dh * ch)
+    x = Math.max(0, Math.min(x, cw))
+    y = Math.max(0, Math.min(y, ch))
+    return { x, y }
   }
 
-  const onMouseDown = (e: React.MouseEvent) => {
+  // 指针捕获：拖出画布边缘也能继续框选，只有松开鼠标才结束
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* ignore */ }
     setDrawing(true); setCrop(null)
     const p = getCanvasPos(e); setStart(p); setCur(p)
   }
   const rafRef = useRef(0)
-  const onMouseMove = (e: React.MouseEvent) => {
+  const onPointerMove = (e: React.PointerEvent) => {
     if (!drawing) return
     // Throttle with requestAnimationFrame for smooth rendering
     if (rafRef.current) return
@@ -115,11 +120,13 @@ export function CanvasCrop({ open, imagePath, onOk, onSkip, onCancel }: Props) {
       rafRef.current = 0
     })
   }
-  const onMouseUp = () => {
-    if (!drawing) return; setDrawing(false)
+  const onPointerUp = (e: React.PointerEvent) => {
+    if (!drawing) return
+    try { e.currentTarget.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+    setDrawing(false)
     const sx = Math.min(start.x, cur.x); const sy = Math.min(start.y, cur.y)
     const sw = Math.abs(cur.x - start.x); const sh = Math.abs(cur.y - start.y)
-    if (sw > 10 && sh > 10) setCrop({ x: sx, y: sy, width: sw, height: sh })
+    if (sw > 5 && sh > 5) setCrop({ x: sx, y: sy, width: sw, height: sh })
   }
 
   return (
@@ -132,12 +139,22 @@ export function CanvasCrop({ open, imagePath, onOk, onSkip, onCancel }: Props) {
         <Button size="small" icon={<MinusOutlined />} onClick={() => setRotation((p) => (p - 1 + 360) % 360)} />
         <span style={{ color: '#1677ff', fontWeight: 500, minWidth: 52, textAlign: 'center' }}>{rotation}°</span>
         <Button size="small" icon={<PlusOutlined />} onClick={() => setRotation((p) => (p + 1) % 360)} />
-        <span style={{ color: crop ? '#1677ff' : '#999', fontSize: 12, fontWeight: crop ? 600 : 400 }}>
-          {crop ? `✅ 已选区域 ${crop.width}×${crop.height}px（点击确认保存）` : '🖱️ 在图片上拖拽框选图形区域'}
+        <span style={{ color: crop ? '#1677ff' : '#999', fontSize: 12, fontWeight: crop || drawing ? 600 : 400 }}>
+          {crop
+            ? `✅ 已选区域 ${crop.width}×${crop.height}px（点击确认保存）`
+            : drawing
+              ? `📏 正在框选 ${Math.abs(cur.x - start.x)}×${Math.abs(cur.y - start.y)}px`
+              : '🖱️ 在图片上拖拽框选图形区域（可拖到边缘）'}
         </span>
       </Space>
-      <div style={{ background: '#181818', borderRadius: 8, display: 'flex', justifyContent: 'center', cursor: 'crosshair' }}>
-        <canvas ref={canvasRef} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp} />
+      <div style={{ background: '#181818', borderRadius: 8, display: 'flex', justifyContent: 'center' }}>
+        <canvas
+          ref={canvasRef}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          style={{ cursor: 'crosshair', touchAction: 'none' }}
+        />
       </div>
     </Modal>
   )

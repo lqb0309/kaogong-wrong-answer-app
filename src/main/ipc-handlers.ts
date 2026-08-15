@@ -7,7 +7,7 @@ import { classifyImage, getAiSuggestion, generateReflection, generateDailyInduct
 import { writeToVault, vaultOnline, reorganizeVault } from './obsidian'
 import { storeImage, saveMarkdown, buildMarkdown, getLocalDataDir } from './storage'
 import { generateTraceId } from './utils'
-import { scanExistingCards, writeInductionResults, readCardContent, scanDailyNotes, readDailyNote } from './knowledge-cards'
+import { scanExistingCards, writeInductionResults, readCardContent, scanDailyNotes, readDailyNote, bumpCardError, findQuestionsForCard, findCardPathsForQuestion, parseCategoryFromPath, getReviewQueueCards } from './knowledge-cards'
 import { fetchQuestionsForTest, generatePdf } from './pdf-generator'
 import { queueSize, flushVaultQueue } from './retry-queue'
 import fs from 'fs-extra'
@@ -819,37 +819,98 @@ export function registerIpcHandlers(): void {
     return readDailyNote(date)
   })
 
-  // Daily review: deterministic random cards based on date seed
-  ipcMain.handle('knowledge:reviewCards', (_e, count: number) => {
+  // 加权复习队列：错误次数×3 + 距上次复习天数 + 易错点加成，排除今日已复习（学习闭环核心）
+  ipcMain.handle('knowledge:reviewQueue', (_e, count?: number) => {
     try {
-      const allCards = scanExistingCards()
-      if (allCards.length === 0) return { success: true, cards: [] }
-
-      const today = new Date().toISOString().slice(0, 10)
-      // Deterministic hash from date
-      let seed = 0
-      for (let i = 0; i < today.length; i++) {
-        seed = ((seed << 5) - seed) + today.charCodeAt(i)
-        seed |= 0
-      }
-
-      // Seeded random selection
-      const cardsWithHash = allCards.map((card, idx) => {
-        let h = seed ^ (idx * 2654435761)
-        h = Math.abs(h ^ (h >> 16))
-        return { card, hash: h }
-      })
-
-      cardsWithHash.sort((a, b) => b.hash - a.hash)
-      const selected = cardsWithHash.slice(0, Math.min(count || 3, allCards.length)).map(c => c.card)
-
-      return { success: true, cards: selected }
+      const { cards, reviewedToday } = getReviewQueueCards(count)
+      return { success: true, cards, reviewedToday }
     } catch (err: any) {
-      return { success: false, error: err.message, cards: [] }
+      return { success: false, error: err.message, cards: [], reviewedToday: [] }
+    }
+  })
+
+  // 复习反馈：记录 review_log；做错 → 卡片错误计数 +1
+  ipcMain.handle('knowledge:reviewDone', (_e, cardPath: string, result: string) => {
+    try {
+      const db = getDb()
+      const today = new Date().toISOString().slice(0, 10)
+      db.prepare('INSERT INTO review_log (card_path, date, result, created_at) VALUES (?, ?, ?, ?)')
+        .run(cardPath, today, result || 'done', new Date().toISOString())
+      let cardBumped = false
+      if (result === 'wrong') {
+        const r = bumpCardError(cardPath)
+        cardBumped = r.success
+      }
+      logger.info('knowledge', 'review_done', `复习完成: ${cardPath}`, { result, cardBumped })
+      return { success: true, cardBumped }
+    } catch (err: any) {
+      return { success: false, error: err.message }
+    }
+  })
+
+  // 卡片 ↔ 错题双向链：查看与卡片分类匹配的错题
+  ipcMain.handle('knowledge:cardQuestions', (_e, cardPath: string) => {
+    try {
+      return { success: true, questions: findQuestionsForCard(cardPath) }
+    } catch (err: any) {
+      return { success: false, error: err.message, questions: [] }
     }
   })
 
   // ============ Test Builder (组卷导出) ============
+
+  // 从复习队列选题（卡片分类 → 匹配错题，每卡最多 3 题）
+  ipcMain.handle('test:selectFromReviewQueue', (_e, count?: number) => {
+    try {
+      const { cards: queueCards } = getReviewQueueCards(count)
+      const db = getDb()
+
+      const ids: string[] = []
+      for (const card of queueCards) {
+        const [l1, l2, l3] = parseCategoryFromPath(card.file_path)
+        const rows = db.prepare(
+          `SELECT id FROM questions
+           WHERE status = 'confirmed' AND level1 = ?
+             AND (? = '' OR level2 = ?)
+             AND (? = '' OR COALESCE(level3, '') = ?)
+           ORDER BY error_count DESC, created_at DESC LIMIT 3`
+        ).all(l1, l2 || '', l2 || '', l3 || '', l3 || '') as { id: string }[]
+        for (const r of rows) ids.push(r.id)
+      }
+      return { success: true, ids: Array.from(new Set(ids)), cards: queueCards }
+    } catch (err: any) {
+      return { success: false, error: err.message, ids: [] }
+    }
+  })
+
+  // 对答案回填：做错的题错误计数 +1，并同步到匹配的知识卡片（闭环）
+  ipcMain.handle('test:markAnswers', (_e, wrongIds: string[]) => {
+    try {
+      const db = getDb()
+      const ids = Array.isArray(wrongIds) ? wrongIds : []
+      let updated = 0
+      let cardBumps = 0
+      const bumpedCards = new Set<string>()
+      for (const id of ids) {
+        const row = db.prepare('SELECT id, level1, level2, level3, error_count FROM questions WHERE id = ?').get(id) as any
+        if (!row) continue
+        db.prepare('UPDATE questions SET error_count = error_count + 1 WHERE id = ?').run(id)
+        updated++
+        // 匹配知识卡片并同步错误计数
+        const cardPaths = findCardPathsForQuestion(row)
+        for (const p of cardPaths) {
+          if (bumpedCards.has(p)) continue
+          bumpedCards.add(p)
+          const r = bumpCardError(p)
+          if (r.success) cardBumps++
+        }
+      }
+      logger.info('test', 'answers_marked', `对答案回填完成: ${updated} 道错题`, { cardBumps })
+      return { success: true, updated, cardBumps }
+    } catch (err: any) {
+      return { success: false, error: err.message }
+    }
+  })
 
   ipcMain.handle('test:selectQuestions', (_e, params: {
     ids?: string[]
@@ -871,9 +932,13 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle('test:generatePdf', async (_e, questionIds: string[], options: any) => {
+  ipcMain.handle('test:generatePdf', async (e, questionIds: string[], options: any) => {
     try {
-      const result = await generatePdf(questionIds, options)
+      const senderWin = BrowserWindow.fromWebContents(e.sender)
+      const onProgress = (stage: string, done?: number, total?: number) => {
+        if (senderWin && !senderWin.isDestroyed()) senderWin.webContents.send('pdf:progress', { stage, done, total, ts: Date.now() })
+      }
+      const result = await generatePdf(questionIds, options, onProgress)
       if (!result.success || !result.filePath) return result
 
       // Open save dialog for the user to choose final location

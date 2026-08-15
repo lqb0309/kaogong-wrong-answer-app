@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Typography, Button, Space, Tag, Input, Empty, App, Modal, Select, Popconfirm, Tooltip, Radio, Alert, Card, Row, Col } from 'antd'
+import { Typography, Button, Space, Tag, Input, Empty, App, Modal, Select, Popconfirm, Tooltip, Radio, Alert, Card, Row, Col, Switch } from 'antd'
 import {
   CheckOutlined, StepForwardOutlined, ThunderboltOutlined,
   LeftOutlined, RightOutlined, PlusOutlined, BulbOutlined,
@@ -46,6 +46,8 @@ export function PendingPage() {
   const [cropImagePath, setCropImagePath] = useState('')
   const [hasGraphics, setHasGraphics] = useState(false)
   const [graphicImagePath, setGraphicImagePath] = useState('')
+  const [autoPlay, setAutoPlay] = useState(false)
+  const [sessionStats, setSessionStats] = useState({ confirmed: 0, skipped: 0 })
   const hydratedRef = useRef(false)
 
   useEffect(() => { if (!tree.length) loadTree() }, [tree.length, loadTree])
@@ -100,20 +102,9 @@ export function PendingPage() {
   const canGoPrev = currentIndex > 0
   const canGoNext = currentIndex < queue.length - 1
 
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft' && canGoPrev) setCurrentIndex(currentIndex - 1)
-      if (e.key === 'ArrowRight' && canGoNext) setCurrentIndex(currentIndex + 1)
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && current) handleConfirm()
-      if (e.key === 's' && (e.metaKey || e.ctrlKey) && current) handleSkip()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentIndex, current, canGoPrev, canGoNext])
-
   const handleConfirm = useCallback(async () => {
     if (!current) return
+    const isLast = queue.length === 1
     setConfirmLoading(true)
     try {
       const timestamp = dayjs().format('YYYYMMDD-HHmmss')
@@ -149,16 +140,42 @@ export function PendingPage() {
       message.error(`入库失败: ${err.message}`)
     } finally {
       setConfirmLoading(false)
+      setSessionStats((s) => ({ ...s, confirmed: s.confirmed + 1 }))
       removeItem(current.id)
+      // 最后一题确认完成 → 流程接力：提示生成今日知识点归纳
+      if (isLast) {
+        Modal.confirm({
+          title: '今日错题已全部确认 🎉',
+          content: `本次共确认 ${sessionStats.confirmed + 1} 道错题，是否现在生成「今日知识点归纳」？`,
+          okText: '去归纳',
+          cancelText: '稍后',
+          onOk: () => navigate('/knowledge')
+        })
+      }
     }
-  }, [current, message, removeItem])
+  }, [current, queue.length, hasGraphics, graphicImagePath, message, removeItem, sessionStats.confirmed, navigate])
 
   const handleSkip = useCallback(() => {
     if (!current) return
     // 跳过 → 状态回退为待分类，回到成品库可重新分类或再次送入待确认
     window.api.updateQuestionStatus(current.id, 'pending').catch(() => {})
+    setSessionStats((s) => ({ ...s, skipped: s.skipped + 1 }))
     removeItem(current.id)
   }, [current, removeItem])
+
+  // Keyboard shortcuts（自动播放模式下，单独按 Enter 即可确认下一题）
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft' && canGoPrev) setCurrentIndex(currentIndex - 1)
+      if (e.key === 'ArrowRight' && canGoNext) setCurrentIndex(currentIndex + 1)
+      const isCmdEnter = e.key === 'Enter' && (e.metaKey || e.ctrlKey)
+      const isAutoEnter = e.key === 'Enter' && autoPlay && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey
+      if ((isCmdEnter || isAutoEnter) && current) handleConfirm()
+      if (e.key === 's' && (e.metaKey || e.ctrlKey) && current) handleSkip()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [currentIndex, current, canGoPrev, canGoNext, autoPlay, handleConfirm, handleSkip])
 
   const handleBatchConfirm = useCallback(async () => {
     Modal.confirm({
@@ -303,11 +320,19 @@ export function PendingPage() {
     <div>
       <PageHeader
         title={<span>待确认 <Typography.Text type="secondary" style={{ fontSize: 15, fontWeight: 400 }}>{currentIndex + 1} / {queue.length}</Typography.Text></span>}
-        subtitle="← → 切换 · ⌘Enter 确认 · ⌘S 跳过"
+        subtitle={`← → 切换 · ${autoPlay ? 'Enter' : '⌘Enter'} 确认 · ⌘S 跳过 · 已确认 ${sessionStats.confirmed} / 跳过 ${sessionStats.skipped}`}
         extra={
-          <Popconfirm title={`将队列中所有 ${queue.length} 张错题以 AI 建议标签直接入库？`} onConfirm={handleBatchConfirm} okText="全部入库" cancelText="取消">
-            <Button icon={<ThunderboltOutlined />} disabled={queue.length === 0}>全部快速入库</Button>
-          </Popconfirm>
+          <Space>
+            <Space size={4}>
+              <Switch size="small" checked={autoPlay} onChange={setAutoPlay} />
+              <Tooltip title="开启后单独按 Enter 即可确认并自动进入下一题，适合连续处理">
+                <span style={{ fontSize: 12, color: '#888' }}>自动播放</span>
+              </Tooltip>
+            </Space>
+            <Popconfirm title={`将队列中所有 ${queue.length} 张错题以 AI 建议标签直接入库？`} onConfirm={handleBatchConfirm} okText="全部入库" cancelText="取消">
+              <Button icon={<ThunderboltOutlined />} disabled={queue.length === 0}>全部快速入库</Button>
+            </Popconfirm>
+          </Space>
         }
       />
 

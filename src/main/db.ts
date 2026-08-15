@@ -96,6 +96,16 @@ export function initDatabase(): void {
       group_type TEXT DEFAULT 'default',
       created_at TEXT NOT NULL
     );
+
+    -- 知识卡片复习日志（加权复习队列）
+    CREATE TABLE IF NOT EXISTS review_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      card_path TEXT NOT NULL,
+      date TEXT NOT NULL,
+      result TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_review_card ON review_log(card_path, date);
   `)
 
   // Insert default tag tree if table is empty

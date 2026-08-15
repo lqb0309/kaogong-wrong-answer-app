@@ -55,6 +55,8 @@ export function SettingsPage() {
       fast_induct_error_count: Number(config.fast_induct_error_count || 1),
       upload_concurrency: Number(config.upload_concurrency || 5),
       classify_prompt: config.classify_prompt || '',
+      auto_classify_after_import: config.auto_classify_after_import === 'true',
+      review_daily_count: Number(config.review_daily_count || 5),
       log_level: config.log_level || 'WARN',
       log_retention: Number(config.log_retention || 30),
       error_notify: config.error_notify !== 'false'
@@ -140,6 +142,7 @@ export function SettingsPage() {
           image_compress_threshold: 500, image_compress_quality: 0.7,
           confidence_threshold: 0.7, weakness_threshold: 5,
           fast_induct_error_count: 1, upload_concurrency: 5, classify_prompt: '',
+          auto_classify_after_import: false, review_daily_count: 5,
           log_level: 'WARN', log_retention: 30, error_notify: true
         }}>
 
@@ -280,6 +283,17 @@ export function SettingsPage() {
             </Form.Item>
             <Form.Item label="上传并发数" name="upload_concurrency" tooltip="批量导入图片时同时处理的数量（1~8）">
               <InputNumber min={1} max={8} style={{ width: '100%' }} />
+            </Form.Item>
+          </Panel>
+
+          {/* ===== 学习流程 ===== */}
+          <Panel header="学习流程" key="flow">
+            <Form.Item label="导入后自动分类" name="auto_classify_after_import" valuePropName="checked"
+              tooltip="开启后批量导入的图片会自动进入 AI 分类，省去手动操作">
+              <Switch />
+            </Form.Item>
+            <Form.Item label="每日复习数量" name="review_daily_count" tooltip="加权复习队列每天推荐的知识卡片数量">
+              <InputNumber min={1} max={20} style={{ width: '100%' }} />
             </Form.Item>
           </Panel>
 

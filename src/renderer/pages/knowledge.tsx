@@ -5,7 +5,7 @@ import {
   BookOutlined, FileTextOutlined, ReloadOutlined, BulbOutlined,
   FireOutlined, WarningOutlined, PlusCircleOutlined,
   CopyOutlined, FolderOpenOutlined, ExportOutlined, EyeOutlined,
-  CalendarOutlined, ThunderboltOutlined
+  CalendarOutlined, ThunderboltOutlined, CheckOutlined
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { MarkdownRenderer } from '@/components/markdown-renderer'
@@ -39,6 +39,8 @@ export function KnowledgePage() {
   const [writing, setWriting] = useState(false)
   const [writeResult, setWriteResult] = useState<any>(null)
   const [reviewCards, setReviewCards] = useState<any[]>([])
+  const [reviewedToday, setReviewedToday] = useState<string[]>([])
+  const [cardQuestions, setCardQuestions] = useState<any[]>([])
   const [allCards, setAllCards] = useState<any[]>([])
   const [dailyNotes, setDailyNotes] = useState<any[]>([])
   const [cardSearch, setCardSearch] = useState('')
@@ -67,15 +69,28 @@ export function KnowledgePage() {
   const loadCards = useCallback(async () => {
     try {
       const [reviewRes, cardsRes, notesRes] = await Promise.all([
-        window.api.getReviewCards(3),
+        window.api.getReviewQueue(),
         window.api.getKnowledgeCards(),
         window.api.getDailyNotes()
       ])
       if (reviewRes.cards) setReviewCards(reviewRes.cards)
+      if (reviewRes.reviewedToday) setReviewedToday(reviewRes.reviewedToday)
       if (cardsRes.cards) setAllCards(cardsRes.cards)
       if (notesRes.notes) setDailyNotes(notesRes.notes)
     } catch { /* */ }
   }, [])
+
+  // 标记复习完成（加权队列闭环）
+  const handleMarkReview = useCallback(async (card: any, result: 'done' | 'wrong') => {
+    const r = await window.api.markReview(card.file_path, result)
+    if (r.success) {
+      message.success(result === 'done' ? '已标记复习完成' : '已标记「做错了」，该知识点权重提升')
+      setReviewCards((prev) => prev.filter((c: any) => c.file_path !== card.file_path))
+      setReviewedToday((prev) => [...prev, card.file_path])
+    } else {
+      message.error(r.error || '操作失败')
+    }
+  }, [message])
 
   useEffect(() => { fetchOverview() }, [fetchOverview])
   useEffect(() => { loadCards() }, [loadCards])
@@ -152,6 +167,12 @@ export function KnowledgePage() {
 
   const handleViewCard = async (card: any) => {
     setCardModalTitle(card.title); setCardModalContent(''); setCardModalOpen(true)
+    setCardQuestions([])
+    // 卡片 ↔ 错题双向链：加载关联错题
+    try {
+      const qr = await window.api.getCardQuestions(card.file_path)
+      if (qr.success) setCardQuestions(qr.questions || [])
+    } catch { /* ignore */ }
     const r = await window.api.getKnowledgeCardContent(card.file_path)
     if (r.success && r.content) {
       // Strip frontmatter + first h1 heading (title already shown in Modal bar)
@@ -408,19 +429,36 @@ export function KnowledgePage() {
         ))}
       </Row>
 
-      {/* Daily Review Cards */}
+      {/* Daily Review Queue（加权复习队列 · 学习闭环） */}
       {reviewCards.length > 0 && (
         <Card size="small" style={{ marginBottom: 16, border: '1px solid #ffd591', background: '#fffbe6' }}
-          title={<span><ThunderboltOutlined style={{ color: '#fa8c16' }} /> 今日复习推荐（每天随机 3 张，巩固记忆）</span>}
-          extra={<Button size="small" type="link" onClick={loadCards} icon={<ReloadOutlined />}>换一批</Button>}>
+          title={<span><ThunderboltOutlined style={{ color: '#fa8c16' }} /> 今日复习队列（按薄弱程度加权推荐）</span>}
+          extra={
+            <Space size={4}>
+              <span style={{ fontSize: 12, color: '#999' }}>今日已复习 {reviewedToday.length} 张</span>
+              <Button size="small" type="link" onClick={loadCards} icon={<ReloadOutlined />}>换一批</Button>
+            </Space>
+          }>
           <Row gutter={12}>
             {reviewCards.map((card: any, idx: number) => (
-              <Col span={8} key={idx}>
+              <Col xs={24} sm={12} md={8} key={idx}>
                 <Card size="small" hoverable style={{ cursor: 'pointer' }} onClick={() => handleViewCard(card)}>
-                  <Typography.Text strong ellipsis style={{ fontSize: 14 }}>{card.title}</Typography.Text>
-                  <div style={{ marginTop: 4 }}><Tag color="purple" style={{ fontSize: 11 }}>{KNOWLEDGE_TYPE_LABELS[card.knowledge_type] || card.knowledge_type}</Tag></div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Typography.Text strong ellipsis style={{ fontSize: 14, maxWidth: '70%' }}>{card.title}</Typography.Text>
+                    <Tag color="orange" style={{ fontSize: 10, margin: 0 }}>权重 {card.score ?? 0}</Tag>
+                  </div>
+                  <div style={{ marginTop: 4 }}>
+                    <Tag color="purple" style={{ fontSize: 11 }}>{KNOWLEDGE_TYPE_LABELS[card.knowledge_type] || card.knowledge_type}</Tag>
+                    {card.error_count > 0 && <Tag color="red" style={{ fontSize: 11 }}>错 {card.error_count} 次</Tag>}
+                  </div>
                   <div style={{ marginTop: 6, fontSize: 11, color: '#888' }}>{[card.level1, card.level2, card.level3].filter(Boolean).join(' > ')}</div>
-                  <Tag icon={<EyeOutlined />} color="blue" style={{ fontSize: 11, marginTop: 6 }}>点击查看详情</Tag>
+                  <div style={{ marginTop: 8, display: 'flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
+                    <Button size="small" type="primary" ghost icon={<CheckOutlined />}
+                      onClick={() => handleMarkReview(card, 'done')}>已复习</Button>
+                    <Button size="small" danger ghost
+                      onClick={() => handleMarkReview(card, 'wrong')}>做错了</Button>
+                    <Button size="small" type="link" icon={<EyeOutlined />} onClick={() => handleViewCard(card)}>详情</Button>
+                  </div>
                 </Card>
               </Col>
             ))}
@@ -569,9 +607,39 @@ export function KnowledgePage() {
         }]} />
 
       {/* Modals */}
-      <Modal title={cardModalTitle} open={cardModalOpen} onCancel={() => setCardModalOpen(false)} footer={null} width={700}>
-        <div className="markdown-body" style={{ maxHeight: '60vh', overflow: 'auto', padding: 8, fontSize: 14, lineHeight: 1.8 }}>
+      <Modal title={cardModalTitle} open={cardModalOpen} onCancel={() => setCardModalOpen(false)} footer={null} width={720}>
+        <div className="markdown-body" style={{ maxHeight: '45vh', overflow: 'auto', padding: 8, fontSize: 14, lineHeight: 1.8 }}>
           {cardModalContent ? <MarkdownRenderer content={cardModalContent} /> : '加载中...'}
+        </div>
+        {/* 卡片 ↔ 错题双向链 */}
+        <div style={{ marginTop: 16, borderTop: '1px solid #f0f0f0', paddingTop: 12 }}>
+          <Typography.Text strong style={{ fontSize: 13 }}>
+            关联错题（{cardQuestions.length} 道）
+          </Typography.Text>
+          {cardQuestions.length === 0 ? (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>暂无匹配的已确认错题</Typography.Text>
+          ) : (
+            <div style={{ marginTop: 8, maxHeight: 180, overflow: 'auto' }}>
+              {cardQuestions.map((q: any) => (
+                <div key={q.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px',
+                  borderBottom: '1px solid #f5f5f5', fontSize: 12
+                }}>
+                  <Tag color={q.error_count >= 3 ? 'red' : q.error_count >= 2 ? 'orange' : 'default'} style={{ margin: 0, flexShrink: 0 }}>
+                    错 {q.error_count} 次
+                  </Tag>
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {[q.level1, q.level2, q.level3].filter(Boolean).join(' > ')}
+                  </span>
+                  <span style={{ color: '#999', flexShrink: 0 }}>{q.created_at?.slice(0, 10)}</span>
+                  {q.obsidian_path && (
+                    <Button size="small" type="link" style={{ padding: '0 4px', fontSize: 11, flexShrink: 0 }}
+                      onClick={() => handleOpenCardInObsidian(q.obsidian_path)}>打开</Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </Modal>
       <Modal title={noteModalTitle} open={noteModalOpen} onCancel={() => setNoteModalOpen(false)} footer={null} width={750}>

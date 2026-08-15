@@ -2,6 +2,7 @@ import fs from 'fs-extra'
 import { join } from 'path'
 import { readConfig } from './config'
 import { logger } from './logger'
+import { getDb } from './db'
 
 // ============ Types ============
 
@@ -12,6 +13,9 @@ export interface ExistingCard {
   level1: string
   level2: string
   level3: string | null
+  error_count: number
+  last_seen: string
+  created: string
 }
 
 export interface NewCardInput {
@@ -100,7 +104,10 @@ export function scanExistingCards(): ExistingCard[] {
               knowledge_type: fm.knowledge_type || 'pitfall',
               level1: fm.category?.split('/')[0] || level1,
               level2: fm.category?.split('/')[1] || level2,
-              level3: fm.category?.split('/')[2] || level3
+              level3: fm.category?.split('/')[2] || level3,
+              error_count: fm.error_count || 0,
+              last_seen: fm.last_seen || '',
+              created: fm.created || ''
             })
           }
         } catch {
@@ -595,4 +602,110 @@ export function writeInductionResults(
   }
 
   return result
+}
+
+// ============ 复习与双向链（学习闭环） ============
+
+/** 从卡片路径解析分类路径，如 "判断推理/图形推理/笔记本/部分数.md" → ["判断推理","图形推理","部分数"] */
+export function parseCategoryFromPath(filePath: string): string[] {
+  const parts = filePath.replace(/\\/g, '/').split('/').filter(p => p && p !== '笔记本')
+  // 去掉最后的 .md 文件名（卡片名不是分类）
+  if (parts.length > 0 && parts[parts.length - 1].endsWith('.md')) {
+    parts.pop()
+  }
+  return parts
+}
+
+/** 卡片错误次数 +1（组卷回填 / 复习做错时调用），更新 frontmatter */
+export function bumpCardError(cardPath: string): { success: boolean; error?: string } {
+  const vaultRoot = getVaultRoot()
+  if (!vaultRoot) return { success: false, error: '未配置 Obsidian Vault' }
+  const fullPath = resolvePath(cardPath)
+  if (!fs.existsSync(fullPath)) return { success: false, error: `卡片不存在: ${cardPath}` }
+  try {
+    let content = fs.readFileSync(fullPath, 'utf-8')
+    const fm = parseFrontmatter(content)
+    const now = new Date().toISOString().slice(0, 10)
+    const current = fm.error_count || 0
+    content = content.replace(/^error_count:\s*\d+/m, `error_count: ${current + 1}`)
+    content = content.replace(/^last_seen:\s*.+/m, `last_seen: ${now}`)
+    content = content.replace(/^updated:\s*.+/m, `updated: ${now}`)
+    // 置信度随错误次数提升
+    if (current + 1 >= 5 && fm.confidence !== 'high') {
+      content = content.replace(/^confidence:\s*\w+/m, 'confidence: high')
+    } else if (current + 1 >= 3 && fm.confidence === 'low') {
+      content = content.replace(/^confidence:\s*low/m, 'confidence: medium')
+    }
+    content = content.replace(/- 出现次数:.*/, `- 出现次数: ${current + 1} 次 | 最近: ${now}`)
+    fs.writeFileSync(fullPath, content, 'utf-8')
+    logger.info('knowledge', 'card_error_bumped', `卡片错误计数 +1: ${cardPath}`, { errorCount: current + 1 })
+    return { success: true }
+  } catch (err: any) {
+    logger.error('knowledge', 'card_error_bump_failed', `卡片错误计数更新失败: ${cardPath}`, { error: err.message })
+    return { success: false, error: err.message }
+  }
+}
+
+/** 查找与卡片分类匹配的已确认错题（卡片 ↔ 错题双向链） */
+export function findQuestionsForCard(cardPath: string, limit = 20): any[] {
+  const [l1, l2, l3] = parseCategoryFromPath(cardPath)
+  if (!l1) return []
+  const db = getDb()
+  try {
+    const conditions = ["status = 'confirmed'", 'level1 = ?']
+    const values: any[] = [l1]
+    if (l2) { conditions.push('level2 = ?'); values.push(l2) }
+    if (l3) { conditions.push('level3 = ?'); values.push(l3) }
+    return db.prepare(
+      `SELECT id, image_url, level1, level2, level3, error_count, source, obsidian_path, created_at
+       FROM questions WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT ?`
+    ).all(...values, limit)
+  } catch {
+    return []
+  }
+}
+
+/** 查找与错题分类匹配的知识卡片路径（组卷回填用），返回卡片文件相对路径数组 */
+export function findCardPathsForQuestion(question: { level1: string; level2?: string; level3?: string | null }): string[] {
+  const vaultRoot = getVaultRoot()
+  if (!vaultRoot || !fs.existsSync(vaultRoot)) return []
+  const { level1, level2, level3 } = question
+  const subdir = level3 ? `${level1}/${level2 || ''}/${level3}` : level2 ? `${level1}/${level2}` : level1
+  const dir = join(vaultRoot, subdir, '笔记本')
+  if (!fs.existsSync(dir)) return []
+  try {
+    return fs.readdirSync(dir)
+      .filter((f: string) => f.endsWith('.md') && !f.startsWith('_'))
+      .map((f: string) => `${subdir}/笔记本/${f}`)
+  } catch {
+    return []
+  }
+}
+
+/** 加权复习队列（学习闭环核心）：错误次数×3 + 距上次复习天数 + 易错点加成，排除今日已复习 */
+export function getReviewQueueCards(count?: number): { cards: ExistingCard[]; reviewedToday: string[] } {
+  const allCards = scanExistingCards()
+  if (allCards.length === 0) return { cards: [], reviewedToday: [] }
+
+  const today = new Date().toISOString().slice(0, 10)
+  const db = getDb()
+  const reviewedToday = (db.prepare('SELECT DISTINCT card_path FROM review_log WHERE date = ?').all(today) as { card_path: string }[]).map(r => r.card_path)
+  const reviewedSet = new Set(reviewedToday)
+  const dailyCount = Math.max(1, count || Number(readConfig('review_daily_count') || 5))
+
+  const cards = allCards
+    .filter(c => !reviewedSet.has(c.file_path))
+    .map(card => {
+      let score = (card.error_count || 0) * 3
+      if (card.last_seen) {
+        const days = Math.max(0, Math.floor((Date.now() - new Date(card.last_seen + 'T00:00:00').getTime()) / 86400000))
+        score += Math.min(days, 30)
+      }
+      if (card.knowledge_type === 'pitfall') score += 1
+      return { ...card, score }
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.min(dailyCount, allCards.length))
+
+  return { cards, reviewedToday }
 }

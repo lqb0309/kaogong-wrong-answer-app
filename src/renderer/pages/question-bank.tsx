@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Typography, Table, Input, Select, Space, Button, Tag, App, Popconfirm, Image, Modal, Descriptions, Form, InputNumber, Empty } from 'antd'
+import { Typography, Table, Input, Select, Space, Button, Tag, App, Popconfirm, Image, Modal, Descriptions, Form, InputNumber, Empty, Segmented } from 'antd'
 import { SearchOutlined, DeleteOutlined, ReloadOutlined, FileTextOutlined, SyncOutlined, FolderOpenOutlined, EditOutlined, ExportOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useTagTreeStore } from '@/stores/tag-tree'
@@ -40,6 +40,7 @@ export function QuestionBankPage() {
   const [detailItem, setDetailItem] = useState<Question | null>(null)
   const [editingItem, setEditingItem] = useState<Question | null>(null)
   const [editForm] = Form.useForm()
+  const [viewMode, setViewMode] = useState<'list' | 'group'>('list')
   const [editSaving, setEditSaving] = useState(false)
   const { message } = App.useApp()
   const { tree, load: loadTree } = useTagTreeStore()
@@ -85,6 +86,22 @@ export function QuestionBankPage() {
   }, [page, level1Filter, level2Filter, level3Filter, search, sortBy, sortOrder])
 
   useEffect(() => { fetchQuestions() }, [])
+
+  // 按知识点（level1 › level2 › level3）分组（学习闭环：知识点聚合视图）
+  const knowledgeGroups = useMemo(() => {
+    const map = new Map<string, { name: string; level1: string; level2: string; level3: string; questions: Question[] }>()
+    for (const q of questions) {
+      const l1 = q.level1 || '未分类'
+      const l2 = q.level2 || ''
+      const l3 = q.level3 || ''
+      const key = [l1, l2, l3].filter(Boolean).join(' › ')
+      if (!map.has(key)) map.set(key, { name: key, level1: l1, level2: l2, level3: l3, questions: [] })
+      map.get(key)!.questions.push(q)
+    }
+    return Array.from(map.values())
+      .map(g => ({ ...g, count: g.questions.length, totalErr: g.questions.reduce((s, q) => s + (q.error_count || 0), 0) }))
+      .sort((a, b) => b.totalErr - a.totalErr || b.count - a.count)
+  }, [questions])
 
   const handleDelete = async (id: string) => {
     await window.api.deleteQuestion(id)
@@ -254,36 +271,88 @@ export function QuestionBankPage() {
           style={{ width: 260 }}
           allowClear
         />
+        <Segmented
+          value={viewMode}
+          onChange={(v) => setViewMode(v as 'list' | 'group')}
+          options={[{ value: 'list', label: '列表' }, { value: 'group', label: '按知识点' }]}
+          size="small"
+        />
       </Space>
 
-      <Table
-        dataSource={questions}
-        columns={columns}
-        rowKey="id"
-        loading={loading}
-        size="small"
-        locale={{
-          emptyText: (
-            <Empty description={search || level1Filter || level2Filter ? '没有符合条件的错题' : '还没有已确认的错题，去成品库分类入库吧'} image={Empty.PRESENTED_IMAGE_SIMPLE}>
-              <Button type="primary" onClick={() => navigate('/')}>去上传</Button>
-            </Empty>
-          )
-        }}
-        onRow={(r) => ({ onClick: () => setDetailItem(r), style: { cursor: 'pointer' } })}
-        pagination={{
-          current: page,
-          pageSize: 30,
-          total,
-          onChange: (p) => { setPage(p); fetchQuestions(p) },
-          showTotal: (t) => `共 ${t} 条`
-        }}
-        onChange={(_pagination, _filters, sorter: any) => {
-          if (sorter?.columnKey) {
-            setSortBy(sorter.columnKey)
-            setSortOrder(sorter.order === 'ascend' ? 'asc' : 'desc')
-          }
-        }}
-      />
+      {viewMode === 'group' ? (
+        /* 按知识点分组视图（学习闭环：知识点 ↔ 错题聚合） */
+        <Table
+          dataSource={knowledgeGroups}
+          rowKey="name"
+          size="small"
+          loading={loading}
+          pagination={false}
+          expandable={{
+            expandedRowRender: (g: any) => (
+              <div>
+                {g.questions.map((q: Question) => (
+                  <div key={q.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px',
+                    borderBottom: '1px solid #f5f5f5', fontSize: 12, cursor: 'pointer'
+                  }} onClick={() => setDetailItem(q)}>
+                    <Image src={q.image_url} width={36} height={36} style={{ objectFit: 'cover', borderRadius: 3 }} preview={false} />
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#666' }}>
+                      {(q.ocr_text || '（纯图形题）').slice(0, 50)}
+                    </span>
+                    <Tag color={q.error_count >= 3 ? 'red' : q.error_count >= 2 ? 'orange' : 'default'}>错 {q.error_count} 次</Tag>
+                    <span style={{ color: '#999', flexShrink: 0 }}>{q.created_at?.slice(0, 10)}</span>
+                  </div>
+                ))}
+              </div>
+            )
+          }}
+          columns={[
+            { title: '知识点', dataIndex: 'name', render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
+            { title: '错题数', dataIndex: 'count', width: 90, align: 'center' as const, render: (v: number) => <Tag color="blue">{v} 道</Tag> },
+            { title: '累计错误', dataIndex: 'totalErr', width: 100, align: 'center' as const, render: (v: number) => <Tag color={v >= 5 ? 'red' : v >= 3 ? 'orange' : 'default'}>{v} 次</Tag> },
+            {
+              title: '操作', width: 140,
+              render: (_: any, g: any) => (
+                <Space size={4} onClick={(e) => e.stopPropagation()}>
+                  <Button size="small" type="link" icon={<ExportOutlined />}
+                    onClick={() => navigate(`/test-builder?level1=${encodeURIComponent(g.level1)}&level2=${encodeURIComponent(g.level2 || '')}&level3=${encodeURIComponent(g.level3 || '')}`)}>
+                    组卷重做
+                  </Button>
+                </Space>
+              )
+            }
+          ]}
+        />
+      ) : (
+        <Table
+          dataSource={questions}
+          columns={columns}
+          rowKey="id"
+          loading={loading}
+          size="small"
+          locale={{
+            emptyText: (
+              <Empty description={search || level1Filter || level2Filter ? '没有符合条件的错题' : '还没有已确认的错题，去成品库分类入库吧'} image={Empty.PRESENTED_IMAGE_SIMPLE}>
+                <Button type="primary" onClick={() => navigate('/')}>去上传</Button>
+              </Empty>
+            )
+          }}
+          onRow={(r) => ({ onClick: () => setDetailItem(r), style: { cursor: 'pointer' } })}
+          pagination={{
+            current: page,
+            pageSize: 30,
+            total,
+            onChange: (p) => { setPage(p); fetchQuestions(p) },
+            showTotal: (t) => `共 ${t} 条`
+          }}
+          onChange={(_pagination, _filters, sorter: any) => {
+            if (sorter?.columnKey) {
+              setSortBy(sorter.columnKey)
+              setSortOrder(sorter.order === 'ascend' ? 'asc' : 'desc')
+            }
+          }}
+        />
+      )}
 
       <Modal title="编辑错题" open={!!editingItem} onCancel={() => setEditingItem(null)} width={600}
         footer={<Space><Button onClick={() => setEditingItem(null)}>取消</Button>
