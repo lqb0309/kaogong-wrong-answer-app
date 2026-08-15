@@ -163,15 +163,17 @@ export function PendingPage() {
     removeItem(current.id)
   }, [current, removeItem])
 
-  // Keyboard shortcuts（自动播放模式下，单独按 Enter 即可确认下一题）
+  // Keyboard shortcuts（自动播放模式下，单独按 Enter 即可确认下一题；输入框内不触发，避免误确认）
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft' && canGoPrev) setCurrentIndex(currentIndex - 1)
-      if (e.key === 'ArrowRight' && canGoNext) setCurrentIndex(currentIndex + 1)
+      const target = e.target as HTMLElement | null
+      const inInput = !!target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+      if (e.key === 'ArrowLeft' && canGoPrev && !inInput) setCurrentIndex(currentIndex - 1)
+      if (e.key === 'ArrowRight' && canGoNext && !inInput) setCurrentIndex(currentIndex + 1)
       const isCmdEnter = e.key === 'Enter' && (e.metaKey || e.ctrlKey)
-      const isAutoEnter = e.key === 'Enter' && autoPlay && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey
+      const isAutoEnter = e.key === 'Enter' && autoPlay && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && !inInput
       if ((isCmdEnter || isAutoEnter) && current) handleConfirm()
-      if (e.key === 's' && (e.metaKey || e.ctrlKey) && current) handleSkip()
+      if (e.key === 's' && (e.metaKey || e.ctrlKey) && current && !inInput) handleSkip()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)

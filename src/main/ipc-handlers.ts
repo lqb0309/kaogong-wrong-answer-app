@@ -887,15 +887,27 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('test:markAnswers', (_e, wrongIds: string[]) => {
     try {
       const db = getDb()
+      const vaultRoot = readConfig('obsidian_vault') || ''
       const ids = Array.isArray(wrongIds) ? wrongIds : []
       let updated = 0
       let cardBumps = 0
       const bumpedCards = new Set<string>()
       for (const id of ids) {
-        const row = db.prepare('SELECT id, level1, level2, level3, error_count FROM questions WHERE id = ?').get(id) as any
+        const row = db.prepare('SELECT id, level1, level2, level3, error_count, obsidian_path FROM questions WHERE id = ?').get(id) as any
         if (!row) continue
         db.prepare('UPDATE questions SET error_count = error_count + 1 WHERE id = ?').run(id)
         updated++
+        // 同步 Obsidian 笔记 frontmatter 中的 error_count，保持 DB 与 vault 一致
+        if (row.obsidian_path && vaultRoot) {
+          const fullPath = path.join(vaultRoot, row.obsidian_path)
+          if (fs.existsSync(fullPath)) {
+            try {
+              const content = fs.readFileSync(fullPath, 'utf-8')
+              const next = content.replace(/^error_count:\s*\d+/m, `error_count: ${(row.error_count || 0) + 1}`)
+              if (next !== content) fs.writeFileSync(fullPath, next, 'utf-8')
+            } catch { /* ignore */ }
+          }
+        }
         // 匹配知识卡片并同步错误计数
         const cardPaths = findCardPathsForQuestion(row)
         for (const p of cardPaths) {
