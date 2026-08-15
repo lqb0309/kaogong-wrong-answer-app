@@ -2,6 +2,7 @@
   "name": "wrong-answer-app",
   "version": "0.2.0",
   "description": "考公错题自动分类系统",
+  "author": "Deca <lqb0309@users.noreply.github.com>",
   "main": "./out/main/index.js",
   "scripts": {
     "postinstall": "electron-rebuild",
