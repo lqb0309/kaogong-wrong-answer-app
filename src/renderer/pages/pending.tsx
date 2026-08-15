@@ -14,6 +14,11 @@ import { useTagTreeStore } from '@/stores/tag-tree'
 import { PageHeader } from '@/components/page-header'
 import dayjs from 'dayjs'
 
+// 图片加载失败占位图
+const IMG_FALLBACK = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><rect width="120" height="120" fill="#f5f5f5"/><text x="60" y="62" font-size="12" text-anchor="middle" fill="#bbb">图片加载失败</text></svg>'
+)
+
 // 右侧信息区的分区标题
 function SectionLabel({ icon, children }: { icon?: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -162,13 +167,14 @@ export function PendingPage() {
       okText: '全部入库',
       cancelText: '取消',
       onOk: async () => {
-        let count = 0
         const fastErrorCount = Number(getSetting('fast_induct_error_count', '1')) || 1
+        const succeeded: string[] = []
+        const failed: string[] = []
         for (const item of queue) {
           try {
             const timestamp = dayjs().format('YYYYMMDD-HHmmss')
             const fileName = `${timestamp}.md`
-            await window.api.writeToObsidian({
+            const r = await window.api.writeToObsidian({
               ...item,
               imageUrl: item.imageUrl,
               errorCount: fastErrorCount,
@@ -177,11 +183,19 @@ export function PendingPage() {
               graphicImagePath: item.graphicImagePath || '',
               fileName
             })
-            count++
-          } catch { /* continue */ }
+            if (r && r.success) succeeded.push(item.id)
+            else failed.push(item.id)
+          } catch {
+            failed.push(item.id)
+          }
         }
-        message.success(`已入库 ${count} 张错题`)
-        queue.forEach((q) => removeItem(q.id))
+        if (succeeded.length > 0) {
+          message.success(`已入库 ${succeeded.length} 张错题${failed.length ? `，${failed.length} 张失败留在队列中` : ''}`)
+        } else {
+          message.error('入库失败，请检查 Obsidian 配置后重试')
+        }
+        // 只移除成功的，失败的保留在队列中可单独处理
+        succeeded.forEach((id) => removeItem(id))
       }
     })
   }, [queue, message, removeItem])
@@ -310,6 +324,7 @@ export function PendingPage() {
               <img
                 src={current.imageUrl}
                 alt="错题截图"
+                onError={(e) => { (e.target as HTMLImageElement).src = IMG_FALLBACK }}
                 style={{ maxWidth: '100%', maxHeight: 420, objectFit: 'contain', borderRadius: 6 }}
               />
             </div>
@@ -330,7 +345,8 @@ export function PendingPage() {
                       opacity: i === currentIndex ? 1 : 0.55,
                       background: '#f5f5f5', boxShadow: i === currentIndex ? '0 0 0 2px rgba(22,119,255,0.2)' : undefined
                     }}>
-                      <img src={q.imageUrl} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt={`第${i + 1}题`} />
+                      <img src={q.imageUrl} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt={`第${i + 1}题`}
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
                     </div>
                   </Tooltip>
                 ))}
@@ -409,9 +425,11 @@ export function PendingPage() {
                     <div style={{ marginTop: 4 }}>
                       <Select
                         size="small"
-                        value={current.errorType || undefined}
-                        onChange={(v) => updateItem(current.id, { errorType: v })}
-                        placeholder="选择错误类型"
+                        mode="tags"
+                        maxCount={1}
+                        value={current.errorType ? [current.errorType] : undefined}
+                        onChange={(v: string[]) => updateItem(current.id, { errorType: v[v.length - 1] || '' })}
+                        placeholder="选择或直接输入新类型"
                         allowClear
                         style={{ width: '100%' }}
                         options={errorTypes.map(t => ({ value: t, label: t }))}

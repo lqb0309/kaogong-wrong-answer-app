@@ -30,6 +30,8 @@ const api = {
   syncVault: () => ipcRenderer.invoke('obsidian:sync'),
   reorganizeVault: () => ipcRenderer.invoke('obsidian:reorganize'),
   getStreak: () => ipcRenderer.invoke('app:streak'),
+  getAppOverview: () => ipcRenderer.invoke('app:overview'),
+  flushRetryQueue: () => ipcRenderer.invoke('retry:flush'),
 
   // Questions
   getQuestions: (params: any) => ipcRenderer.invoke('questions:list', params),
@@ -92,6 +94,12 @@ const api = {
 
   // App info
   getAppVersion: () => ipcRenderer.invoke('app:version'),
+
+  // 渲染进程异常上报
+  reportRendererError: (errorText: string) => ipcRenderer.invoke('log:rendererError', errorText),
+
+  // 网络状态变化上报
+  reportNetworkChange: (status: 'online' | 'offline') => ipcRenderer.invoke('log:network', status),
 
   // Dialog
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory'),

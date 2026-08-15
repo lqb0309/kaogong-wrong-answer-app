@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Typography, Table, Input, Select, Space, Button, Tag, App, Popconfirm, Image, Modal, Descriptions, Form, InputNumber } from 'antd'
+import { useNavigate } from 'react-router-dom'
+import { Typography, Table, Input, Select, Space, Button, Tag, App, Popconfirm, Image, Modal, Descriptions, Form, InputNumber, Empty } from 'antd'
 import { SearchOutlined, DeleteOutlined, ReloadOutlined, FileTextOutlined, SyncOutlined, FolderOpenOutlined, EditOutlined, ExportOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useTagTreeStore } from '@/stores/tag-tree'
@@ -24,6 +25,7 @@ interface Question {
 }
 
 export function QuestionBankPage() {
+  const navigate = useNavigate()
   const [questions, setQuestions] = useState<Question[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -260,6 +262,13 @@ export function QuestionBankPage() {
         rowKey="id"
         loading={loading}
         size="small"
+        locale={{
+          emptyText: (
+            <Empty description={search || level1Filter || level2Filter ? '没有符合条件的错题' : '还没有已确认的错题，去成品库分类入库吧'} image={Empty.PRESENTED_IMAGE_SIMPLE}>
+              <Button type="primary" onClick={() => navigate('/')}>去上传</Button>
+            </Empty>
+          )
+        }}
         onRow={(r) => ({ onClick: () => setDetailItem(r), style: { cursor: 'pointer' } })}
         pagination={{
           current: page,

@@ -71,6 +71,7 @@ export function initDatabase(): void {
     try { db.exec(`ALTER TABLE questions ADD COLUMN ai_raw_level1 TEXT`) } catch { /* already exists */ }
     try { db.exec(`ALTER TABLE questions ADD COLUMN ai_raw_level2 TEXT`) } catch { /* already exists */ }
     try { db.exec(`ALTER TABLE questions ADD COLUMN ai_raw_level3 TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN file_hash TEXT`) } catch { /* already exists */ }
     db.exec(`
     CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
     CREATE INDEX IF NOT EXISTS idx_questions_level1 ON questions(level1);

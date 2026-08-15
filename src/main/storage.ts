@@ -64,7 +64,7 @@ async function compressIfNeeded(sourcePath: string, destPath: string, traceId: s
 }
 
 // ─── Image storage ───
-export async function storeImage(sourcePath: string, traceId: string): Promise<{ imageUrl: string; localAbsPath: string; localRelPath: string }> {
+export async function storeImage(sourcePath: string, traceId: string, fileHash?: string): Promise<{ imageUrl: string; localAbsPath: string; localRelPath: string; fileHash?: string }> {
   const { imagesDir } = ensureDirs()
   const ext = path.extname(sourcePath)
   const destName = `${dayjs().format('YYYYMMDD-HHmmss')}-${Math.random().toString(36).slice(2, 6)}${ext}`
@@ -78,12 +78,12 @@ export async function storeImage(sourcePath: string, traceId: string): Promise<{
   if (easyimageUrl && easyimageToken) {
     try {
       const { url } = await uploadToEasyImage(destPath, traceId)
-      return { imageUrl: url, localAbsPath: destPath, localRelPath }
+      return { imageUrl: url, localAbsPath: destPath, localRelPath, fileHash }
     } catch (err: any) {
       logger.warn('upload', 'easyimage_fallback', `EasyImage 上传失败，使用本地图片`, { error: err.message }, traceId)
     }
   }
-  return { imageUrl: `file://${destPath}`, localAbsPath: destPath, localRelPath }
+  return { imageUrl: `file://${destPath}`, localAbsPath: destPath, localRelPath, fileHash }
 }
 
 // ─── Markdown builder ───
@@ -144,8 +144,8 @@ export async function saveMarkdown(questionData: any): Promise<{ success: boolea
   if (db) {
     db.prepare(`
       INSERT OR REPLACE INTO questions (id, image_url, level1, level2, level3, confidence, ocr_text, reasoning,
-        status, error_count, source, obsidian_path, local_image_path, reflection, error_type, has_graphics, graphic_image_path, trace_id, created_at, confirmed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        status, error_count, source, obsidian_path, local_image_path, reflection, error_type, has_graphics, graphic_image_path, trace_id, file_hash, created_at, confirmed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       questionData.id, questionData.imageUrl || '', questionData.level1 || '未分类',
       questionData.level2 || '', questionData.level3 || null, questionData.confidence || 0,
@@ -153,7 +153,7 @@ export async function saveMarkdown(questionData: any): Promise<{ success: boolea
       questionData.errorCount || 1, questionData.source || '',
       null, questionData.localAbsPath || null, questionData.reflection || null, questionData.errorType || null,
       questionData.hasGraphics ? 1 : 0, questionData.graphicImagePath || null,
-      traceId,
+      traceId, questionData.fileHash || null,
       new Date().toISOString(), questionData.status === 'confirmed' ? new Date().toISOString() : null
     )
   }

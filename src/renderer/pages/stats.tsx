@@ -1,15 +1,16 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Typography, Card, Row, Col, Statistic, Table, Tag, Select, Space, Button, App, Spin, Progress, Empty, Segmented } from 'antd'
+import { Typography, Card, Row, Col, Statistic, Table, Tag, Select, Space, Button, App, Spin, Progress, Empty, Segmented, DatePicker } from 'antd'
 import {
-  FileTextOutlined, RiseOutlined, FireOutlined,
+  FileTextOutlined, FireOutlined,
   CalendarOutlined, ReloadOutlined, ArrowUpOutlined, ArrowDownOutlined,
-  BulbOutlined, PieChartOutlined, WarningOutlined
+  BulbOutlined, WarningOutlined, PlusCircleOutlined, ClockCircleOutlined
 } from '@ant-design/icons'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   LineChart, Line, CartesianGrid, AreaChart, Area,
   PieChart, Pie, Cell, Treemap
 } from 'recharts'
+import dayjs from 'dayjs'
 import { useSettingsStore } from '@/stores/settings'
 import { PageHeader } from '@/components/page-header'
 
@@ -17,22 +18,24 @@ const COLORS = ['#1677ff', '#52c41a', '#fa8c16', '#722ed1', '#eb2f96', '#13c2c2'
 const CHART_COLORS = ['#1677ff', '#fa8c16', '#52c41a', '#722ed1']
 
 interface StatsData {
-  total: number; dailyAvg: number
+  total: number; dailyAvg: number; todayCount: number
   recent7: number; prev7: number; recent30: number; prev30: number
   byLevel1: any[]; byLevel2: any[]; byLevel3: any[]
   dailyStats: any[]; weeklyStats: any[]; monthlyStats: any[]
-  topErrors: any[]; errorDist: any[]; confidenceDist: any
+  topErrors: any[]; errorDist: any[]; errorTypeDist: any[]; confidenceDist: any
 }
 
 export function StatsPage() {
   const [stats, setStats] = useState<StatsData | null>(null)
   const [loading, setLoading] = useState(false)
-  const [timeRange, setTimeRange] = useState(30)
+  const [timeRange, setTimeRange] = useState<number | 'custom'>(30)
+  const [customRange, setCustomRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null)
   const [level1Filter, setLevel1Filter] = useState<string | undefined>()
   const [suggestion, setSuggestion] = useState<string | null>(null)
   const [suggestionLoading, setSuggestionLoading] = useState(false)
   const [chartMode, setChartMode] = useState<string>('line')
   const [drillLevel1, setDrillLevel1] = useState<string | undefined>()
+  const [pendingCount, setPendingCount] = useState(0)
   const { get: getSetting } = useSettingsStore()
   const { message } = App.useApp()
 
@@ -42,6 +45,7 @@ export function StatsPage() {
       const data = await window.api.getStats()
       setStats(data)
     } catch { /* ignore */ }
+    window.api.getPendingCount().then(setPendingCount).catch(() => {})
     setLoading(false)
   }, [])
 
@@ -67,7 +71,7 @@ export function StatsPage() {
   if (!stats) {
     return (
       <div>
-        <Typography.Title level={3}>统计看板</Typography.Title>
+        <PageHeader title="统计看板" subtitle="错题分布、趋势与薄弱点分析" />
         <Card><Empty description="暂无数据，请先上传并确认错题" /></Card>
       </div>
     )
@@ -81,6 +85,11 @@ export function StatsPage() {
   const dailyData = (stats.dailyStats || [])
     .filter((d: any) => {
       const days = (Date.now() - new Date(d.day).getTime()) / (1000 * 86400)
+      if (timeRange === 'custom') {
+        if (!customRange) return true
+        const t = new Date(d.day).getTime()
+        return t >= customRange[0].startOf('day').valueOf() && t <= customRange[1].endOf('day').valueOf()
+      }
       return days <= timeRange
     })
     .map((d: any) => ({ day: d.day?.slice(5), count: d.cnt }))
@@ -193,14 +202,20 @@ export function StatsPage() {
         </Card>
       )}
 
-      {/* Metric Cards */}
+      {/* Metric Cards（8 项指标） */}
       <Row gutter={12} style={{ marginBottom: 12 }}>
-        <Col span={4}>
+        <Col span={3}>
           <Card size="small">
             <Statistic title="总错题数" value={stats.total} prefix={<FileTextOutlined />} />
           </Card>
         </Col>
-        <Col span={4}>
+        <Col span={3}>
+          <Card size="small">
+            <Statistic title="今日新增" value={stats.todayCount || 0} prefix={<PlusCircleOutlined />}
+              valueStyle={{ color: stats.todayCount > 0 ? '#722ed1' : '#999' }} />
+          </Card>
+        </Col>
+        <Col span={3}>
           <Card size="small">
             <Statistic title="本周新增" value={stats.recent7}
               suffix={stats.prev7 > 0 ? (
@@ -212,7 +227,7 @@ export function StatsPage() {
             />
           </Card>
         </Col>
-        <Col span={4}>
+        <Col span={3}>
           <Card size="small">
             <Statistic title="本月新增" value={stats.recent30}
               suffix={stats.prev30 > 0 ? (
@@ -224,23 +239,29 @@ export function StatsPage() {
             />
           </Card>
         </Col>
-        <Col span={4}>
+        <Col span={3}>
           <Card size="small">
             <Statistic title="日均入库" value={stats.dailyAvg} prefix={<CalendarOutlined />} valueStyle={{ fontSize: 24 }} />
           </Card>
         </Col>
-        <Col span={4}>
+        <Col span={3}>
           <Card size="small">
             <Statistic title="高频题型" value={stats.byLevel1?.[0]?.level1 || '-'}
               suffix={stats.byLevel1?.[0] ? <span style={{ fontSize: 12 }}>{stats.byLevel1[0].pct}%</span> : ''}
               prefix={<FireOutlined />} valueStyle={{ fontSize: 18 }} />
           </Card>
         </Col>
-        <Col span={4}>
+        <Col span={3}>
           <Card size="small">
             <Statistic title="薄弱预警" value={stats.topErrors?.filter((e: any) => e.error_count >= threshold).length || 0}
               suffix={<span style={{ fontSize: 12 }}>{threshold}次以上</span>}
               prefix={<WarningOutlined />} valueStyle={{ color: '#ff4d4f', fontSize: 24 }} />
+          </Card>
+        </Col>
+        <Col span={3}>
+          <Card size="small">
+            <Statistic title="待确认" value={pendingCount} prefix={<ClockCircleOutlined />}
+              valueStyle={{ color: pendingCount > 0 ? '#1677ff' : '#999', fontSize: 24 }} />
           </Card>
         </Col>
       </Row>
@@ -252,12 +273,23 @@ export function StatsPage() {
             title="错题趋势"
             size="small"
             extra={
-              <Space size={4}>
+              <Space size={4} wrap>
                 <Segmented size="small" value={chartMode} onChange={setChartMode}
                   options={[{ value: 'line', label: '日' }, { value: 'week', label: '周' }]} />
                 {chartMode === 'line' && (
-                  <Select size="small" value={timeRange} onChange={setTimeRange} style={{ width: 80 }}
-                    options={[{ value: 7, label: '7天' }, { value: 30, label: '30天' }, { value: 90, label: '90天' }]} />
+                  <>
+                    <Select size="small" value={timeRange} onChange={(v) => { setTimeRange(v); if (v !== 'custom') setCustomRange(null) }} style={{ width: 84 }}
+                      options={[{ value: 7, label: '7天' }, { value: 30, label: '30天' }, { value: 90, label: '90天' }, { value: 'custom', label: '自定义' }]} />
+                    {timeRange === 'custom' && (
+                      <DatePicker.RangePicker
+                        size="small"
+                        allowClear={false}
+                        value={customRange}
+                        onChange={(v) => setCustomRange(v as [dayjs.Dayjs, dayjs.Dayjs] | null)}
+                        style={{ width: 220 }}
+                      />
+                    )}
+                  </>
                 )}
               </Space>
             }
@@ -314,9 +346,9 @@ export function StatsPage() {
         </Col>
       </Row>
 
-      {/* Row 2: Bar chart + Error distribution + Confidence */}
+      {/* Row 2: Bar chart + Error distribution + Confidence + Error type */}
       <Row gutter={12} style={{ marginBottom: 12 }}>
-        <Col span={9}>
+        <Col span={6}>
           <Card title="各分类错题数" size="small">
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={barData} layout="horizontal" margin={{ left: 0 }}>
@@ -328,7 +360,7 @@ export function StatsPage() {
             </ResponsiveContainer>
           </Card>
         </Col>
-        <Col span={8}>
+        <Col span={6}>
           <Card title="错误次数分布" size="small">
             <ResponsiveContainer width="100%" height={220}>
               <PieChart>
@@ -348,7 +380,7 @@ export function StatsPage() {
             </ResponsiveContainer>
           </Card>
         </Col>
-        <Col span={7}>
+        <Col span={6}>
           <Card title="置信度分布" size="small">
             <ResponsiveContainer width="100%" height={220}>
               <PieChart>
@@ -366,6 +398,22 @@ export function StatsPage() {
                 <Tooltip />
               </PieChart>
             </ResponsiveContainer>
+          </Card>
+        </Col>
+        <Col span={6}>
+          <Card title="错误类型分布" size="small">
+            {(stats.errorTypeDist || []).length === 0 ? (
+              <Empty description="暂无错误类型数据" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 40 }} />
+            ) : (
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={stats.errorTypeDist} layout="vertical" margin={{ left: 0 }}>
+                  <XAxis type="number" fontSize={10} />
+                  <YAxis type="category" dataKey="error_type" width={80} fontSize={10} />
+                  <Tooltip formatter={(v: any) => [`${v} 题`, '数量']} />
+                  <Bar dataKey="cnt" fill="#fa8c16" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </Card>
         </Col>
       </Row>

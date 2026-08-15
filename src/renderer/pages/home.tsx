@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Typography, Button, App, Card, Tag, Space, Checkbox, Image, Badge, Progress, Popconfirm, Empty, Row, Col, Tooltip, Statistic } from 'antd'
+import { Typography, Button, App, Card, Tag, Space, Checkbox, Image, Badge, Progress, Popconfirm, Empty, Row, Col, Tooltip, Statistic, Tabs } from 'antd'
 import {
   PlusOutlined, ThunderboltOutlined, ClockCircleOutlined, DeleteOutlined,
   CheckOutlined, CloseOutlined, LoadingOutlined, EditOutlined,
-  InboxOutlined, FireOutlined, FileImageOutlined, CheckSquareOutlined
+  InboxOutlined, FireOutlined, FileImageOutlined, CheckSquareOutlined, SyncOutlined
 } from '@ant-design/icons'
 import { usePendingStore } from '@/stores/pending'
 import { useClassifyJobsStore } from '@/stores/classify-jobs'
@@ -26,6 +26,11 @@ interface LibItem {
   createdAt: string
 }
 
+// 图片加载失败占位图
+const IMG_FALLBACK = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><rect width="120" height="120" fill="#f5f5f5"/><text x="60" y="62" font-size="12" text-anchor="middle" fill="#bbb">图片加载失败</text></svg>'
+)
+
 export function HomePage() {
   const navigate = useNavigate()
   const { message } = App.useApp()
@@ -39,16 +44,22 @@ export function HomePage() {
   const [cropTarget, setCropTarget] = useState<LibItem | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
-  const [confirmedCount, setConfirmedCount] = useState(0)
-  const [streak, setStreak] = useState(0)
+  const [overview, setOverview] = useState<{ pendingCount: number; classifiedCount: number; confirmedCount: number; todayCount: number; streak: number; retryQueueSize: number } | null>(null)
   const [dragOver, setDragOver] = useState(false)
+  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'classified'>('all')
+
+  const refreshOverview = useCallback(async () => {
+    try {
+      const data = await window.api.getAppOverview()
+      setOverview(data)
+      setPendingCount(data.pendingCount + data.classifiedCount)
+    } catch { /* ignore */ }
+  }, [])
 
   useEffect(() => {
-    window.api.getPendingCount().then(setPendingCount)
-    window.api.getStreak().then(r => setStreak(r.streak))
-    window.api.getQuestions({ status: 'confirmed', pageSize: 1 }).then(r => setConfirmedCount(r.total)).catch(() => {})
+    refreshOverview()
     loadLibrary()
-  }, [])
+  }, [refreshOverview])
 
   // Upload progress events from main process
   useEffect(() => {
@@ -138,24 +149,32 @@ export function HomePage() {
   // ── 导入：选择文件 / 拖拽 / 粘贴 ──
   const importPaths = async (paths: string[]) => {
     if (!paths || paths.length === 0) return
+    // 同一批内去重
+    const unique = Array.from(new Set(paths))
     setImporting(true)
-    const results = await window.api.uploadImages(paths.map(fp => ({ path: fp, rotation: 0 })))
+    const results = await window.api.uploadImages(unique.map(fp => ({ path: fp, rotation: 0 })))
     let ok = 0
+    let dupCount = 0
     for (const res of results) {
+      if (res?.duplicate) { dupCount++; continue }
       if (res?.success) {
         const qId = `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
         await window.api.writeToObsidian({
           id: qId, imageUrl: res.url, level1: '未分类', level2: '', level3: null,
           confidence: 0, ocrText: '', reasoning: '', errorCount: 1, source: '',
           traceId: res.traceId, fileName: (res.filePath || 'unknown').split('/').pop() || 'unknown', status: 'pending',
-          localAbsPath: res.localAbsPath
+          localAbsPath: res.localAbsPath, fileHash: res.fileHash
         })
         ok++
       }
     }
     setImporting(false)
     loadLibrary()
-    message.success(`已导入 ${ok} 张图片${results.length > ok ? `，${results.length - ok} 张失败` : ''}`)
+    const failCount = results.length - ok - dupCount
+    const parts: string[] = [`已导入 ${ok} 张图片`]
+    if (dupCount > 0) parts.push(`跳过 ${dupCount} 张重复图片`)
+    if (failCount > 0) parts.push(`${failCount} 张失败`)
+    message[ok > 0 ? 'success' : failCount > 0 ? 'error' : 'warning'](parts.join('，'))
   }
 
   const handleImport = async () => {
@@ -209,15 +228,13 @@ export function HomePage() {
 
   const handleCropSkip = () => { setCropTarget(null); setEditingId(null) }
 
-  // ── 批量 AI 分类 ──
-  const handleBatchClassify = async () => {
-    const toClassify = library.filter((q) => selected.includes(q.id) && q.status === 'pending')
-    if (toClassify.length === 0) { message.warning('请选择待分类的图片'); return }
-
+  // ── 批量 AI 分类（核心：按传入列表分类） ──
+  const classifyItems = useCallback(async (items: LibItem[]) => {
+    if (items.length === 0) return
     setClassifying(true)
     clearClassifyJobs()
     const concurrency = 3
-    const queue = [...toClassify]
+    const queue = [...items]
 
     const worker = async () => {
       while (queue.length > 0) {
@@ -267,7 +284,34 @@ export function HomePage() {
     setClassifying(false)
     setSelected([])
     message.success('AI 分类完成')
-  }
+  }, [addItems, message, setClassifyJob, clearClassifyJobs, setClassifying, setSelected])
+
+  const handleBatchClassify = useCallback(async () => {
+    const toClassify = library.filter((q) => selected.includes(q.id) && q.status === 'pending')
+    if (toClassify.length === 0) { message.warning('请选择待分类的图片'); return }
+    await classifyItems(toClassify)
+  }, [library, selected, classifyItems, message])
+
+  // 单题失败重试
+  const retryClassify = useCallback(async (traceId: string, fileName: string) => {
+    const item = library.find((q) => q.traceId === traceId && q.status === 'pending')
+    if (!item) { message.warning('该图片已不在成品库中'); return }
+    setClassifyJob({ traceId, fileName, stage: 'start', message: '重试中...', ts: Date.now() })
+    await classifyItems([item])
+  }, [library, classifyItems, message, setClassifyJob])
+
+  // 手动刷新重试队列
+  const handleFlushRetry = useCallback(async () => {
+    try {
+      const res = await window.api.flushRetryQueue()
+      if (res.flushed > 0) message.success(`已补写 ${res.flushed} 条到 Obsidian`)
+      else if (res.failed > 0) message.warning(`仍有 ${res.failed} 条待写入（请检查 Vault 路径）`)
+      else message.info('没有待重试的写入')
+      refreshOverview()
+    } catch (err: any) {
+      message.error(`刷新失败: ${err.message}`)
+    }
+  }, [message, refreshOverview])
 
   const handleDelete = async (id: string) => {
     await window.api.deleteQuestion(id)
@@ -277,6 +321,7 @@ export function HomePage() {
 
   const pendingItems = library.filter((q) => q.status === 'pending')
   const classifiedItems = library.filter((q) => q.status === 'classified')
+  const visibleLibrary = statusFilter === 'all' ? library : library.filter((q) => q.status === statusFilter)
 
   // Progress helpers
   const jobProgress = (job: { stage: string }) => {
@@ -320,26 +365,38 @@ export function HomePage() {
 
       <SetupBanner />
 
-      {/* 概览统计 */}
+      {/* 概览统计（点击卡片可跳转） */}
       <Row gutter={12} style={{ marginBottom: 12 }}>
-        <Col span={6}>
-          <Card size="small">
-            <Statistic title="待分类" value={pendingItems.length} prefix={<FileImageOutlined />} valueStyle={{ fontSize: 20 }} />
+        <Col span={4}>
+          <Card size="small" hoverable style={{ cursor: 'pointer' }} onClick={() => { if (pendingItems.length > 0) setSelected(pendingItems.map(q => q.id)) }}>
+            <Statistic title="待分类" value={overview?.pendingCount ?? pendingItems.length} prefix={<FileImageOutlined />} valueStyle={{ fontSize: 20 }} />
           </Card>
         </Col>
-        <Col span={6}>
-          <Card size="small">
+        <Col span={4}>
+          <Card size="small" hoverable style={{ cursor: 'pointer' }} onClick={() => navigate('/pending')}>
             <Statistic title="待确认" value={pendingCount} prefix={<ClockCircleOutlined />} valueStyle={{ fontSize: 20, color: '#1677ff' }} />
           </Card>
         </Col>
-        <Col span={6}>
-          <Card size="small">
-            <Statistic title="已入库" value={confirmedCount} prefix={<CheckOutlined />} valueStyle={{ fontSize: 20, color: '#52c41a' }} />
+        <Col span={4}>
+          <Card size="small" hoverable style={{ cursor: 'pointer' }} onClick={() => navigate('/knowledge')}>
+            <Statistic title="今日新增" value={overview?.todayCount ?? 0} suffix="题" prefix={<PlusOutlined />} valueStyle={{ fontSize: 20, color: '#722ed1' }} />
           </Card>
         </Col>
-        <Col span={6}>
-          <Card size="small">
-            <Statistic title="连续使用" value={streak} suffix="天" prefix={<FireOutlined />} valueStyle={{ fontSize: 20, color: '#fa8c16' }} />
+        <Col span={4}>
+          <Card size="small" hoverable style={{ cursor: 'pointer' }} onClick={() => navigate('/questions')}>
+            <Statistic title="已入库" value={overview?.confirmedCount ?? 0} prefix={<CheckOutlined />} valueStyle={{ fontSize: 20, color: '#52c41a' }} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card size="small" hoverable style={{ cursor: 'pointer' }} onClick={() => navigate('/stats')}>
+            <Statistic title="连续使用" value={overview?.streak ?? 0} suffix="天" prefix={<FireOutlined />} valueStyle={{ fontSize: 20, color: '#fa8c16' }} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card size="small" hoverable style={{ cursor: 'pointer', borderColor: (overview?.retryQueueSize ?? 0) > 0 ? '#ffd591' : undefined }}
+            onClick={handleFlushRetry}>
+            <Statistic title="待补写" value={overview?.retryQueueSize ?? 0} suffix="条" prefix={<SyncOutlined />}
+              valueStyle={{ fontSize: 20, color: (overview?.retryQueueSize ?? 0) > 0 ? '#fa8c16' : '#999' }} />
           </Card>
         </Col>
       </Row>
@@ -390,34 +447,48 @@ export function HomePage() {
                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{job.fileName || job.traceId}</span>
                 <Progress percent={jobProgress(job)} size="small" style={{ width: 60, margin: 0 }} strokeWidth={6} showInfo={false} />
                 <span style={{ color: job.stage === 'error' ? '#ff4d4f' : '#888', flexShrink: 0, fontSize: 11 }}>{job.message}</span>
+                {job.stage === 'error' && (
+                  <Button size="small" type="link" style={{ padding: '0 4px', fontSize: 11, flexShrink: 0 }}
+                    onClick={() => retryClassify(job.traceId, job.fileName)}>重试</Button>
+                )}
               </div>
             ))}
           </div>
         </Card>
       )}
 
-      {/* 工具条 */}
+      {/* 工具条 + 状态筛选 */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
         <Space wrap>
-          <Typography.Text strong>全部（{library.length}）</Typography.Text>
-          <Button size="small" icon={<CheckSquareOutlined />} onClick={() => setSelected(pendingItems.map(q => q.id))}
-            disabled={pendingItems.length === 0}>全选待分类</Button>
+          <Tabs size="small" activeKey={statusFilter} onChange={(k) => setStatusFilter(k as any)}
+            items={[
+              { key: 'all', label: `全部 (${library.length})` },
+              { key: 'pending', label: `待分类 (${pendingItems.length})` },
+              { key: 'classified', label: `已分类 (${classifiedItems.length})` }
+            ]}
+            style={{ marginBottom: 0 }}
+          />
           {selected.length > 0 && <Button size="small" onClick={() => setSelected([])}>取消全选（{selected.length}）</Button>}
         </Space>
-        <Button type="primary" icon={<ThunderboltOutlined />} onClick={handleBatchClassify} loading={classifying}
-          disabled={pendingItems.length === 0}>
-          批量 AI 分类（{pendingItems.length}）
-        </Button>
+        <Space>
+          <Button size="small" icon={<CheckSquareOutlined />} onClick={() => setSelected(pendingItems.map(q => q.id))}
+            disabled={pendingItems.length === 0}>全选待分类</Button>
+          <Button type="primary" icon={<ThunderboltOutlined />} onClick={handleBatchClassify} loading={classifying}
+            disabled={pendingItems.length === 0}>
+            批量 AI 分类（{pendingItems.length}）
+          </Button>
+        </Space>
       </div>
 
       {/* 图片网格 */}
-      {library.length === 0 ? (
+      {visibleLibrary.length === 0 ? (
         <Card>
-          <Empty description="点击上方「导入图片」，或直接拖拽截图到此处" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Empty description={statusFilter === 'all' ? '点击上方「导入图片」，或直接拖拽截图到此处' : statusFilter === 'pending' ? '没有待分类的图片' : '没有已分类待确认的图片'}
+            image={Empty.PRESENTED_IMAGE_SIMPLE} />
         </Card>
       ) : (
         <Row gutter={[12, 12]}>
-          {library.map((item) => {
+          {visibleLibrary.map((item) => {
             const isSelected = selected.includes(item.id)
             return (
               <Col xs={12} sm={8} md={6} lg={4} xl={4} key={item.id}>
@@ -432,6 +503,7 @@ export function HomePage() {
                         height={130}
                         style={{ objectFit: 'cover', borderTopLeftRadius: 12, borderTopRightRadius: 12 }}
                         preview={{ mask: '点击查看' }}
+                        fallback={IMG_FALLBACK}
                       />
                       <Checkbox
                         checked={isSelected}

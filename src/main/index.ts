@@ -8,6 +8,18 @@ import { registerIpcHandlers, runAutoInductForRecentDays } from './ipc-handlers'
 
 let mainWindow: BrowserWindow | null = null
 
+// 主进程全局异常上报（PRD 埋点：未捕获异常 / 应用级崩溃）
+process.on('uncaughtException', (err) => {
+  try {
+    logger.error('system', 'main_uncaught', err?.message || String(err), { stack: err?.stack?.slice(0, 800) })
+  } catch { /* logger 自身故障时不再处理 */ }
+})
+process.on('unhandledRejection', (reason) => {
+  try {
+    logger.error('system', 'main_unhandled_rejection', String(reason), { type: typeof reason })
+  } catch { /* ignore */ }
+})
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1200,

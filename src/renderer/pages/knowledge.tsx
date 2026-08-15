@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Typography, Card, Row, Col, Statistic, Table, Tag, Button, App, Tabs, Empty, Space, Tooltip, Progress, Collapse, Modal, Input, Select, Tree, DatePicker } from 'antd'
 import {
   BookOutlined, FileTextOutlined, ReloadOutlined, BulbOutlined,
@@ -27,6 +28,7 @@ interface InductionResult {
 }
 
 export function KnowledgePage() {
+  const navigate = useNavigate()
   const [data, setData] = useState<OverviewData | null>(null)
   const [loading, setLoading] = useState(false)
   const [inducting, setInducting] = useState(false)
@@ -335,7 +337,16 @@ export function KnowledgePage() {
 
   // ===== Early Return =====
   if (!data) {
-    return <div><PageHeader title="📘 知识归纳" /><Card><Empty description="暂无数据，请先上传并确认错题" /></Card></div>
+    return (
+      <div>
+        <PageHeader title="📘 知识归纳" />
+        <Card>
+          <Empty description="暂无数据，请先上传并确认错题" image={Empty.PRESENTED_IMAGE_SIMPLE}>
+            <Button type="primary" onClick={() => navigate('/')}>去上传</Button>
+          </Empty>
+        </Card>
+      </div>
+    )
   }
 
   const { today, priorityList, todayQuestions } = data

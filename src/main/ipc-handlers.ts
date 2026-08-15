@@ -9,8 +9,10 @@ import { storeImage, saveMarkdown, buildMarkdown, getLocalDataDir } from './stor
 import { generateTraceId } from './utils'
 import { scanExistingCards, writeInductionResults, readCardContent, scanDailyNotes, readDailyNote } from './knowledge-cards'
 import { fetchQuestionsForTest, generatePdf } from './pdf-generator'
+import { queueSize, flushVaultQueue } from './retry-queue'
 import fs from 'fs-extra'
 import path from 'path'
+import crypto from 'crypto'
 
 export function registerIpcHandlers(): void {
   // ============ Config ============
@@ -38,6 +40,17 @@ export function registerIpcHandlers(): void {
 
   // Shell / Dialog / File
   ipcMain.handle('app:version', () => app.getVersion())
+
+  // 渲染进程异常上报（PRD 埋点：未捕获异常）
+  ipcMain.handle('log:rendererError', (_e, errorText: string) => {
+    logger.error('system', 'renderer_uncaught', errorText?.slice(0, 2000) || '渲染进程未知异常')
+  })
+
+  // 网络连通性变化（PRD 埋点：在线 → 离线 / 离线 → 在线）
+  ipcMain.handle('log:network', (_e, status: string) => {
+    logger.warn('system', 'network_change', status === 'online' ? '网络已恢复' : '网络已断开', { status })
+  })
+
   ipcMain.handle('shell:openPath', (_e, path: string) => {
     // Use openExternal for URIs (http, https, obsidian://, etc.), openPath for files
     if (/^[a-z][a-z0-9+.-]*:\/\//i.test(path)) {
@@ -217,6 +230,23 @@ export function registerIpcHandlers(): void {
       const traceId = generateTraceId()
       logger.info('upload', 'upload_start', `开始存储图片: ${fp}`, { size: stat.size, rotation }, traceId)
       try {
+        // 重复导入检测：对已导入但未确认的图片按内容 md5 去重
+        let fileHash: string | undefined
+        try {
+          const fd = fs.openSync(fp, 'r')
+          const chunk = Buffer.alloc(256 * 1024)
+          const read = fs.readSync(fd, chunk, 0, chunk.length, 0)
+          fs.closeSync(fd)
+          fileHash = crypto.createHash('md5').update(chunk.subarray(0, read)).digest('hex')
+          const dup = getDb().prepare("SELECT id FROM questions WHERE file_hash = ? AND status IN ('pending', 'classified') LIMIT 1").get(fileHash) as { id: string } | undefined
+          if (dup) {
+            results[idx] = { success: false, filePath: fp, error: '重复导入（该图片已在成品库）', duplicate: true, traceId }
+            done++
+            emitProgress(fp, false, '重复图片')
+            return
+          }
+        } catch { fileHash = undefined }
+
         let sourcePath = fp
         const needsPreprocess = (crop && crop.width > 0 && crop.height > 0) || (rotation && rotation !== 0)
         if (needsPreprocess) {
@@ -235,8 +265,8 @@ export function registerIpcHandlers(): void {
           await pipeline.toFile(tmpPath)
           sourcePath = tmpPath
         }
-        const { imageUrl, localAbsPath, localRelPath } = await storeImage(sourcePath, traceId)
-        results[idx] = { success: true, filePath: fp, url: imageUrl, localAbsPath, localRelPath, traceId }
+        const { imageUrl, localAbsPath, localRelPath, fileHash: hash } = await storeImage(sourcePath, traceId, fileHash)
+        results[idx] = { success: true, filePath: fp, url: imageUrl, localAbsPath, localRelPath, traceId, fileHash: hash }
       } catch (err: any) {
         results[idx] = { success: false, filePath: fp, error: err.message, traceId }
       }
@@ -330,14 +360,40 @@ export function registerIpcHandlers(): void {
     const days = db.prepare('SELECT date FROM login_days ORDER BY date DESC').all() as { date: string }[]
     if (days.length === 0) return { streak: 0, total: 0 }
     let streak = 0
-    const today = new Date().toISOString().slice(0, 10)
+    // 用本地日期计算，避免 DST 导致的跨天偏移
+    const now = new Date()
     for (let i = 0; i < days.length; i++) {
-      const expected = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10)
-      if (days.some(d => d.date === expected)) streak++
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i)
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      if (days.some(x => x.date === key)) streak++
       else break
     }
     return { streak, total: days.length }
   })
+
+  // 首页聚合概览指标
+  ipcMain.handle('app:overview', () => {
+    const db = getDb()
+    const count = (sql: string, ...args: any[]) => (db.prepare(sql).get(...args) as { c: number }).c
+    const pendingCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'pending'")
+    const classifiedCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'classified'")
+    const confirmedCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'confirmed'")
+    const today = new Date().toISOString().slice(0, 10)
+    const todayCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'confirmed' AND date(confirmed_at) = ?", today)
+    const days = db.prepare('SELECT date FROM login_days ORDER BY date DESC').all() as { date: string }[]
+    let streak = 0
+    const now = new Date()
+    for (let i = 0; i < days.length; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i)
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      if (days.some(x => x.date === key)) streak++
+      else break
+    }
+    return { pendingCount, classifiedCount, confirmedCount, todayCount, streak, retryQueueSize: queueSize() }
+  })
+
+  // 手动触发重试队列刷新
+  ipcMain.handle('retry:flush', () => flushVaultQueue())
 
   ipcMain.handle('obsidian:sync', async () => {
     const vaultRoot = readConfig('obsidian_vault') || ''
@@ -468,11 +524,13 @@ export function registerIpcHandlers(): void {
     const recent30 = (db.prepare("SELECT COUNT(*) as cnt FROM questions WHERE created_at >= date('now', '-30 days')").get() as { cnt: number }).cnt
     const prev30 = (db.prepare("SELECT COUNT(*) as cnt FROM questions WHERE created_at >= date('now', '-60 days') AND created_at < date('now', '-30 days')").get() as { cnt: number }).cnt
     const errorDist = db.prepare("SELECT CASE WHEN error_count >= 3 THEN '3+' ELSE CAST(error_count AS TEXT) END as err_level, COUNT(*) as cnt FROM questions GROUP BY err_level ORDER BY err_level").all()
+    const errorTypeDist = db.prepare("SELECT error_type, COUNT(*) as cnt FROM questions WHERE error_type IS NOT NULL AND error_type != '' GROUP BY error_type ORDER BY cnt DESC LIMIT 12").all()
     const confidenceDist = db.prepare('SELECT SUM(CASE WHEN confidence < 0.6 THEN 1 ELSE 0 END) as low, SUM(CASE WHEN confidence >= 0.6 AND confidence < 0.8 THEN 1 ELSE 0 END) as mid, SUM(CASE WHEN confidence >= 0.8 THEN 1 ELSE 0 END) as high FROM questions').get()
+    const todayCount = (db.prepare("SELECT COUNT(*) as c FROM questions WHERE status = 'confirmed' AND date(confirmed_at) = date('now', 'localtime')").get() as { c: number }).c
     const firstRecord = db.prepare('SELECT MIN(created_at) as d FROM questions').get() as { d: string }
     const daysSinceFirst = total > 0 ? Math.max(1, (Date.now() - new Date(firstRecord?.d || new Date().toISOString()).getTime()) / (1000 * 86400)) : 1
     const dailyAvg = total > 0 ? Math.round(total / daysSinceFirst) : 0
-    return { total, dailyAvg, recent7, prev7, recent30, prev30, byLevel1: byLevel1WithPct, byLevel2, byLevel3, dailyStats, weeklyStats, monthlyStats, topErrors, errorDist, confidenceDist }
+    return { total, dailyAvg, todayCount, recent7, prev7, recent30, prev30, byLevel1: byLevel1WithPct, byLevel2, byLevel3, dailyStats, weeklyStats, monthlyStats, topErrors, errorDist, errorTypeDist, confidenceDist }
   })
 
   // Tags

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
-import { Layout, Menu, Badge, Tooltip } from 'antd'
+import { Layout, Menu, Badge, Tooltip, Tag } from 'antd'
 import {
   HomeOutlined,
   ClockCircleOutlined,
@@ -12,7 +12,8 @@ import {
   EditOutlined,
   FireOutlined,
   BookOutlined,
-  FilePdfOutlined
+  FilePdfOutlined,
+  WifiOutlined
 } from '@ant-design/icons'
 import logoPng from '@/assets/logo.png'
 
@@ -25,6 +26,7 @@ export function AppLayout() {
   const [streak, setStreak] = useState(0)
   const [pendingCount, setPendingCount] = useState(0)
   const [version, setVersion] = useState('')
+  const [online, setOnline] = useState(navigator.onLine)
 
   const selectedKey = '/' + location.pathname.split('/')[1]
 
@@ -32,6 +34,23 @@ export function AppLayout() {
     window.api.getStreak().then(r => setStreak(r.streak))
     window.api.getPendingCount().then(setPendingCount)
     window.api.getAppVersion().then(setVersion).catch(() => {})
+  }, [])
+
+  // 路由切换时刷新待确认角标
+  useEffect(() => {
+    window.api.getPendingCount().then(setPendingCount).catch(() => {})
+  }, [location.pathname])
+
+  // 网络状态监听（PRD 埋点：网络连通性变化）
+  useEffect(() => {
+    const goOnline = () => { setOnline(true); window.api.reportNetworkChange?.('online').catch(() => {}) }
+    const goOffline = () => { setOnline(false); window.api.reportNetworkChange?.('offline').catch(() => {}) }
+    window.addEventListener('online', goOnline)
+    window.addEventListener('offline', goOffline)
+    return () => {
+      window.removeEventListener('online', goOnline)
+      window.removeEventListener('offline', goOffline)
+    }
   }, [])
 
   const pendingItem = {
@@ -140,8 +159,13 @@ export function AppLayout() {
           padding: '6px 24px', background: '#fff', borderBottom: '1px solid #f0f0f0',
           height: 44
         }}>
-          <div style={{ fontSize: 12, color: '#999' }}>
+          <div style={{ fontSize: 12, color: '#999', display: 'flex', alignItems: 'center', gap: 8 }}>
             {location.pathname === '/' ? '上传 → AI 分类 → 人工确认 → 知识库' : ''}
+            {!online && (
+              <Tag color="red" style={{ margin: 0 }}>
+                <WifiOutlined /> 离线模式
+              </Tag>
+            )}
           </div>
           <Tooltip title={`连续打开 ${streak} 天`}>
             <span style={{ fontSize: 12, color: '#fa8c16' }}>

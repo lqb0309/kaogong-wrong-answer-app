@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Typography, Table, Select, Input, Space, Tag, Button, Modal, Tooltip, Switch, App } from 'antd'
 import { SearchOutlined, ExportOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
+import dayjs from 'dayjs'
 import { PageHeader } from '@/components/page-header'
 
 interface LogEntry {
@@ -98,7 +99,7 @@ export function LogViewerPage() {
   const columns: ColumnsType<LogEntry> = [
     {
       title: '时间', dataIndex: 'timestamp', width: 170,
-      render: (v: string) => v?.slice(0, 19).replace('T', ' ')
+      render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm:ss')
     },
     {
       title: '级别', dataIndex: 'level', width: 80,
@@ -248,7 +249,7 @@ export function LogViewerPage() {
         <Table
           dataSource={traceLogs}
           columns={[
-            { title: '时间', dataIndex: 'timestamp', width: 160, render: (v: string) => v?.slice(11, 19) },
+            { title: '时间', dataIndex: 'timestamp', width: 160, render: (v: string) => dayjs(v).format('HH:mm:ss') },
             { title: '级别', dataIndex: 'level', width: 70, render: (v: string) => <Tag color={levelColors[v]}>{v}</Tag> },
             { title: '模块', dataIndex: 'module', width: 80, render: (v: string) => moduleLabels[v] || v },
             { title: '事件', dataIndex: 'event' },
