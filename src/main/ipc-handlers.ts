@@ -375,7 +375,7 @@ export function registerIpcHandlers(): void {
     const offset = (page - 1) * pageSize
     const sortCol = ['created_at', 'confidence', 'error_count', 'level1'].includes(sortBy) ? sortBy : 'created_at'
     const sortDir = sortOrder === 'asc' ? 'ASC' : 'DESC'
-    const items = db.prepare(`SELECT id, image_url, level1, level2, level3, confidence, ocr_text, reasoning, status, error_count, source, obsidian_path, local_image_path, reflection, error_type, group_id, has_graphics, graphic_image_path, trace_id, created_at, confirmed_at FROM questions${whereClause} ORDER BY ${sortCol} ${sortDir} LIMIT ? OFFSET ?`).all(...values, pageSize, offset)
+    const items = db.prepare(`SELECT id, image_url, level1, level2, level3, confidence, ocr_text, reasoning, status, error_count, source, obsidian_path, local_image_path, reflection, error_type, group_id, has_graphics, graphic_image_path, match_type, ai_raw_level1, ai_raw_level2, ai_raw_level3, trace_id, created_at, confirmed_at FROM questions${whereClause} ORDER BY ${sortCol} ${sortDir} LIMIT ? OFFSET ?`).all(...values, pageSize, offset)
     return { items, total }
   })
   ipcMain.handle('questions:get', (_e, id: string) => getDb().prepare('SELECT * FROM questions WHERE id = ?').get(id) || null)
