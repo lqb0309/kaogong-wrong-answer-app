@@ -10,7 +10,9 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "pack": "electron-builder --dir",
-    "dist": "electron-vite build && electron-builder"
+    "dist": "electron-vite build && electron-builder",
+    "pack:fast": "electron-vite build && electron-builder --dir -c.mac.identity=null",
+    "dist:fast": "electron-vite build && electron-builder -c.mac.identity=null"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.2",

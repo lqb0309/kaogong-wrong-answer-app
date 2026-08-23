@@ -1,7 +1,16 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Card, Form, Input, Select, Slider, InputNumber, Switch, Button, Divider, App, Alert, Collapse, Space } from 'antd'
+import { Card, Form, Input, Select, Slider, InputNumber, Switch, Button, Divider, App, Alert, Collapse, Space, Tooltip } from 'antd'
 import { useSettingsStore } from '@/stores/settings'
 import { ReloadOutlined } from '@ant-design/icons'
+
+// 模型名可能很长，选中后显示省略，hover 显示全名
+const modelLabelRender = (props: any) => (
+  <Tooltip title={props?.label} placement="topLeft">
+    <span style={{ display: 'inline-block', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'help' }}>
+      {props?.label}
+    </span>
+  </Tooltip>
+)
 import { PageHeader } from '@/components/page-header'
 
 const { Panel } = Collapse
@@ -209,7 +218,8 @@ export function SettingsPage() {
             </Form.Item>
             <Space.Compact style={{ width: '100%' }}>
               <Form.Item name="vision_model" noStyle>
-                <Select placeholder="模型名称" options={visionOpts} showSearch
+                <Select placeholder="模型名称" options={visionOpts} showSearch labelRender={modelLabelRender} style={{ width: '100%' }}
+                  optionFilterProp="label"
                   dropdownRender={(menu) => (
                     <>{menu}<Divider style={{ margin: '4px 0' }} /><Button type="link" icon={<ReloadOutlined spin={visionFetching} />} onClick={fetchVisionModels} style={{ width: '100%' }}>从 API 拉取</Button></>
                   )} />
@@ -245,7 +255,8 @@ export function SettingsPage() {
             </Form.Item>
             <Space.Compact style={{ width: '100%' }}>
               <Form.Item name="ai_model" noStyle>
-                <Select placeholder="模型名称" options={reasonOpts} showSearch
+                <Select placeholder="模型名称" options={reasonOpts} showSearch labelRender={modelLabelRender} style={{ width: '100%' }}
+                  optionFilterProp="label"
                   dropdownRender={(menu) => (
                     <>{menu}<Divider style={{ margin: '4px 0' }} /><Button type="link" icon={<ReloadOutlined spin={reasonFetching} />} onClick={fetchReasonModels} style={{ width: '100%' }}>从 API 拉取</Button></>
                   )} />

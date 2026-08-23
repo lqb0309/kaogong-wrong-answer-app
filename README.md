@@ -43,7 +43,7 @@ npm run dev        # 开发模式
 npm run dist       # 产物在 dist/（macOS arm64 dmg）
 ```
 
-> 签名说明：仓库配置了本机自签名证书 `Deca Dev Cert`（见 `electron-builder.yml` 的 `mac.identity`）。自签名仅供本机使用，若首次启动提示"无法验证开发者"，请**右键 → 打开**一次即可。若需对外分发，请使用 Apple Developer 证书 + 公证。
+> 签名说明：本项目**默认不签名**（macOS adhoc 签名，打包快）。本机自用直接运行；**换到其他电脑**首次打开若提示"无法验证开发者"，请**右键 → 打开**一次；若提示"已损坏"，在终端执行 `sudo xattr -dr com.apple.quarantine "/Applications/小乖的考公错题屋.app"`。若要对外无感分发，需 Apple Developer 证书 + 公证。
 
 ## 💾 数据存储位置
 
