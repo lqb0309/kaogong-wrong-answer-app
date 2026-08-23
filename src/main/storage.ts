@@ -145,7 +145,7 @@ export async function saveMarkdown(questionData: any): Promise<{ success: boolea
     db.prepare(`
       INSERT OR REPLACE INTO questions (id, image_url, level1, level2, level3, confidence, ocr_text, reasoning,
         status, error_count, source, obsidian_path, local_image_path, reflection, error_type, has_graphics, graphic_image_path, trace_id, file_hash, created_at, confirmed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       questionData.id, questionData.imageUrl || '', questionData.level1 || '未分类',
       questionData.level2 || '', questionData.level3 || null, questionData.confidence || 0,
