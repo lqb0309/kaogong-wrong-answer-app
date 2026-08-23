@@ -7,6 +7,7 @@ const api = {
   setConfig: (key: string, value: string) => ipcRenderer.invoke('config:set', key, value),
   createBackup: () => ipcRenderer.invoke('backup:create'),
   listBackups: () => ipcRenderer.invoke('backup:list'),
+  restoreBackup: (name: string) => ipcRenderer.invoke('backup:restore', name),
 
   // File
   readFile: (filePath: string) => ipcRenderer.invoke('file:read', filePath),
@@ -24,6 +25,8 @@ const api = {
   getAiSuggestion: (statsData: any) => ipcRenderer.invoke('ai:suggest', statsData),
   generateReflection: (params: any) => ipcRenderer.invoke('ai:reflect', params),
   fetchModels: (baseURL: string, apiKey: string) => ipcRenderer.invoke('ai:models', baseURL, apiKey),
+  getAiUsage: (days?: number) => ipcRenderer.invoke('ai:usage', days),
+  getBillingOverview: () => ipcRenderer.invoke('billing:overview'),
   testConnection: (baseURL: string, apiKey: string, model: string) => ipcRenderer.invoke('ai:test', baseURL, apiKey, model),
 
   // Obsidian
@@ -40,6 +43,7 @@ const api = {
   getQuestion: (id: string) => ipcRenderer.invoke('questions:get', id),
   deleteQuestion: (id: string) => ipcRenderer.invoke('questions:delete', id),
   getPendingCount: () => ipcRenderer.invoke('questions:pendingCount'),
+  createManualQuestion: (data: any) => ipcRenderer.invoke('questions:createManual', data),
   updateQuestionStatus: (id: string, status: string) => ipcRenderer.invoke('questions:updateStatus', id, status),
   updateQuestion: (id: string, updates: any) => ipcRenderer.invoke('questions:update', id, updates),
   getStats: () => ipcRenderer.invoke('questions:stats'),

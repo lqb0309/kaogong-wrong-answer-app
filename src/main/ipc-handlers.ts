@@ -10,13 +10,15 @@ import { generateTraceId } from './utils'
 import { scanExistingCards, writeInductionResults, readCardContent, scanDailyNotes, readDailyNote, bumpCardError, findQuestionsForCard, findCardPathsForQuestion, parseCategoryFromPath, getReviewQueueCards } from './knowledge-cards'
 import { fetchQuestionsForTest, generatePdf } from './pdf-generator'
 import { queueSize, flushVaultQueue } from './retry-queue'
-import { ensureTodayPlan, updatePlanTask, submitPlanFeedback, getPlanHistory, regenerateTodayPlan, getExamInfo, getExamPhase, getStoredForwardPlan, generateForwardPlan } from './daily-plan'
+import { ensureTodayPlan, updatePlanTask, submitPlanFeedback, getPlanHistory, regenerateTodayPlan, getExamInfo, getExamPhase, getStoredForwardPlan, generateForwardPlan, completePlanTaskForActivity } from './daily-plan'
 import fs from 'fs-extra'
 import path from 'path'
 import crypto from 'crypto'
 import { localDateKey } from './date-utils'
-import { createDatabaseBackup, listDatabaseBackups } from './backup'
+import { createDatabaseBackup, listDatabaseBackups, restoreDatabaseBackup } from './backup'
 import dayjs from 'dayjs'
+import { getAiUsageSummary } from './ai-usage'
+import { getBillingOverview } from './billing'
 
 export function registerIpcHandlers(): void {
   // ============ Config ============
@@ -46,6 +48,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('app:version', () => app.getVersion())
   ipcMain.handle('backup:create', async () => ({ success: true, backup: await createDatabaseBackup('manual') }))
   ipcMain.handle('backup:list', () => listDatabaseBackups())
+  ipcMain.handle('backup:restore', async (_e, name: string) => {
+    await restoreDatabaseBackup(name)
+    setTimeout(() => { app.relaunch(); app.exit(0) }, 500)
+    return { success: true, restarting: true }
+  })
+  ipcMain.handle('ai:usage', (_e, days?: number) => getAiUsageSummary(days))
+  ipcMain.handle('billing:overview', () => getBillingOverview())
 
   // 渲染进程异常上报（PRD 埋点：未捕获异常）
   ipcMain.handle('log:rendererError', (_e, errorText: string) => {
@@ -246,7 +255,7 @@ export function registerIpcHandlers(): void {
           fileHash = crypto.createHash('md5').update(chunk.subarray(0, read)).digest('hex')
           const dup = getDb().prepare("SELECT id FROM questions WHERE file_hash = ? AND status IN ('pending', 'classified') LIMIT 1").get(fileHash) as { id: string } | undefined
           if (dup) {
-            results[idx] = { success: false, filePath: fp, error: '重复导入（该图片已在成品库）', duplicate: true, traceId }
+            results[idx] = { success: false, filePath: fp, error: '重复导入（该图片已经导入）', duplicate: true, traceId }
             done++
             emitProgress(fp, false, '重复图片')
             return
@@ -432,9 +441,16 @@ export function registerIpcHandlers(): void {
     if (level2) { conditions.push('level2 = ?'); values.push(level2) }
     if (level3) { conditions.push('level3 = ?'); values.push(level3) }
     if (search) {
-      conditions.push('(ocr_text LIKE ? OR reflection LIKE ? OR source LIKE ? OR error_type LIKE ? OR level1 LIKE ? OR level2 LIKE ? OR level3 LIKE ?)')
-      const s = `%${search}%`
-      values.push(s, s, s, s, s, s, s)
+      const rawSearch = String(search).trim()
+      const terms = rawSearch.split(/\s+/).filter(Boolean)
+      if (terms.length > 0 && terms.every(term => Array.from(term).length >= 3)) {
+        conditions.push('id IN (SELECT question_id FROM question_fts_v2 WHERE question_fts_v2 MATCH ?)')
+        values.push(terms.map(term => `"${term.replace(/"/g, '""')}"`).join(' AND '))
+      } else {
+        conditions.push('(ocr_text LIKE ? OR reflection LIKE ? OR source LIKE ? OR error_type LIKE ? OR level1 LIKE ? OR level2 LIKE ? OR level3 LIKE ?)')
+        const pattern = `%${rawSearch}%`
+        values.push(pattern, pattern, pattern, pattern, pattern, pattern, pattern)
+      }
     }
     const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : ''
     const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM questions${whereClause}`).get(...values) as { cnt: number }
@@ -519,6 +535,22 @@ export function registerIpcHandlers(): void {
     const row = getDb().prepare("SELECT COUNT(*) as cnt FROM questions WHERE status IN ('pending', 'classified')").get() as { cnt: number }
     return row.cnt
   })
+  ipcMain.handle('questions:createManual', async (_e, data: any) => {
+    const id = `manual-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
+    const questionData = {
+      id, imageUrl: data.imageUrl || '', level1: data.level1 || '未分类', level2: data.level2 || '',
+      level3: data.level3 || null, confidence: 1, ocrText: data.ocrText || '', reasoning: '手动新建',
+      errorCount: Number(data.errorCount) || 1, source: data.source || '', traceId: id, status: data.mode === 'review' ? 'classified' : 'confirmed'
+    }
+    if (data.mode !== 'review') return saveMarkdown(questionData)
+    getDb().prepare(`INSERT INTO questions
+      (id, image_url, level1, level2, level3, confidence, ocr_text, reasoning, status, error_count, source, trace_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'classified', ?, ?, ?, ?)`)
+      .run(id, questionData.imageUrl, questionData.level1, questionData.level2, questionData.level3, 1,
+        questionData.ocrText, questionData.reasoning, questionData.errorCount, questionData.source, id, new Date().toISOString())
+    logger.info('confirm', 'manual_question_created', `手动新建错题: ${id}`)
+    return { success: true, id, pendingReview: true }
+  })
   ipcMain.handle('questions:stats', () => {
     const db = getDb()
     const total = (db.prepare('SELECT COUNT(*) as cnt FROM questions').get() as { cnt: number }).cnt
@@ -541,7 +573,18 @@ export function registerIpcHandlers(): void {
     const firstRecord = db.prepare('SELECT MIN(created_at) as d FROM questions').get() as { d: string }
     const daysSinceFirst = total > 0 ? Math.max(1, (Date.now() - new Date(firstRecord?.d || new Date().toISOString()).getTime()) / (1000 * 86400)) : 1
     const dailyAvg = total > 0 ? Math.round(total / daysSinceFirst) : 0
-    return { total, dailyAvg, todayCount, recent7, prev7, recent30, prev30, byLevel1: byLevel1WithPct, byLevel2, byLevel3, dailyStats, weeklyStats, monthlyStats, topErrors, errorDist, errorTypeDist, confidenceDist }
+    const reviewedThisWeek = (db.prepare("SELECT COUNT(DISTINCT card_path) c FROM review_log WHERE date >= date('now', 'localtime', '-6 days')").get() as { c: number }).c
+    const dueReviewCount = (db.prepare("SELECT COUNT(*) c FROM review_state WHERE due_date <= date('now', 'localtime')").get() as { c: number }).c
+    const review30 = db.prepare("SELECT COUNT(*) total, SUM(CASE WHEN result = 'wrong' THEN 1 ELSE 0 END) wrong FROM review_log WHERE date >= date('now', 'localtime', '-29 days')").get() as { total: number; wrong: number }
+    const reviewWrongRate = review30.total > 0 ? Math.round((review30.wrong || 0) / review30.total * 100) : 0
+    const latestAttempt = db.prepare('SELECT accuracy, created_at FROM test_attempts ORDER BY created_at DESC LIMIT 1').get() as { accuracy: number; created_at: string } | undefined
+    const reviewDaily = db.prepare("SELECT date, COUNT(DISTINCT card_path) cnt FROM review_log WHERE date >= date('now', 'localtime', '-89 days') GROUP BY date ORDER BY date").all()
+    const weaknessPoints = db.prepare(`SELECT level1, level2, COUNT(*) question_count, SUM(error_count) total_errors,
+      SUM(CASE WHEN error_count >= 2 THEN 1 ELSE 0 END) repeated_count, MAX(created_at) last_error_at
+      FROM questions WHERE status = 'confirmed' GROUP BY level1, level2
+      ORDER BY total_errors DESC, question_count DESC LIMIT 12`).all()
+    return { total, dailyAvg, todayCount, recent7, prev7, recent30, prev30, byLevel1: byLevel1WithPct, byLevel2, byLevel3, dailyStats, weeklyStats, monthlyStats, topErrors, errorDist, errorTypeDist, confidenceDist,
+      reviewedThisWeek, dueReviewCount, reviewWrongRate, latestAttempt: latestAttempt || null, reviewDaily, weaknessPoints }
   })
 
   // Tags
@@ -847,6 +890,7 @@ export function registerIpcHandlers(): void {
       const today = localDateKey()
       db.prepare('INSERT INTO review_log (card_path, date, result, created_at) VALUES (?, ?, ?, ?)')
         .run(cardPath, today, result || 'done', new Date().toISOString())
+      const reviewedCount = (db.prepare('SELECT COUNT(DISTINCT card_path) c FROM review_log WHERE date = ?').get(today) as { c: number }).c
       let cardBumped = false
       if (result === 'wrong') {
         const r = bumpCardError(cardPath)
@@ -870,7 +914,8 @@ export function registerIpcHandlers(): void {
         .run(cardPath, intervalDays, (previous?.repetitions || 0) + 1,
           (previous?.lapses || 0) + (rating === 'wrong' ? 1 : 0), rating, new Date().toISOString(), dueDate)
       logger.info('knowledge', 'review_done', `复习完成: ${cardPath}`, { result, cardBumped })
-      return { success: true, cardBumped, intervalDays, dueDate }
+      const completedPlanTask = completePlanTaskForActivity('review', ['复盘'], reviewedCount)
+      return { success: true, cardBumped, intervalDays, dueDate, completedPlanTask }
     } catch (err: any) {
       return { success: false, error: err.message }
     }
@@ -952,8 +997,10 @@ export function registerIpcHandlers(): void {
         (id, question_ids, wrong_ids, total_count, wrong_count, accuracy, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .run(crypto.randomUUID(), JSON.stringify(allIds), JSON.stringify(ids), totalCount, ids.length, accuracy, new Date().toISOString())
+      const moduleRows = allIds.length ? db.prepare(`SELECT DISTINCT level1 FROM questions WHERE id IN (${allIds.map(() => '?').join(',')})`).all(...allIds) as Array<{ level1: string }> : []
+      const completedPlanTask = completePlanTaskForActivity('test', moduleRows.map(row => row.level1), totalCount)
       logger.info('test', 'answers_marked', `对答案回填完成: ${updated} 道错题`, { cardBumps, totalCount, accuracy })
-      return { success: true, updated, cardBumps, totalCount, accuracy }
+      return { success: true, updated, cardBumps, totalCount, accuracy, completedPlanTask }
     } catch (err: any) {
       return { success: false, error: err.message }
     }

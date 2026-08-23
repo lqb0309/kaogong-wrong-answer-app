@@ -86,6 +86,23 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_questions_file_hash ON questions(file_hash);
     CREATE INDEX IF NOT EXISTS idx_questions_sync_status ON questions(sync_status);
 
+    CREATE VIRTUAL TABLE IF NOT EXISTS question_fts_v2 USING fts5(
+      question_id UNINDEXED, ocr_text, reflection, source, error_type, level1, level2, level3,
+      tokenize = 'trigram'
+    );
+    CREATE TRIGGER IF NOT EXISTS questions_fts_v2_insert AFTER INSERT ON questions BEGIN
+      INSERT INTO question_fts_v2(question_id, ocr_text, reflection, source, error_type, level1, level2, level3)
+      VALUES (new.id, new.ocr_text, new.reflection, new.source, new.error_type, new.level1, new.level2, new.level3);
+    END;
+    CREATE TRIGGER IF NOT EXISTS questions_fts_v2_update AFTER UPDATE ON questions BEGIN
+      DELETE FROM question_fts_v2 WHERE question_id = old.id;
+      INSERT INTO question_fts_v2(question_id, ocr_text, reflection, source, error_type, level1, level2, level3)
+      VALUES (new.id, new.ocr_text, new.reflection, new.source, new.error_type, new.level1, new.level2, new.level3);
+    END;
+    CREATE TRIGGER IF NOT EXISTS questions_fts_v2_delete AFTER DELETE ON questions BEGIN
+      DELETE FROM question_fts_v2 WHERE question_id = old.id;
+    END;
+
     CREATE TABLE IF NOT EXISTS tag_tree (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       data TEXT NOT NULL,
@@ -135,6 +152,18 @@ export function initDatabase(): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_test_attempts_created ON test_attempts(created_at);
+    CREATE TABLE IF NOT EXISTS ai_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      feature TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      prompt_tokens INTEGER NOT NULL DEFAULT 0,
+      completion_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      estimated_cost REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at);
 
     -- 每日备考计划（含 AI 动态调整）
     CREATE TABLE IF NOT EXISTS daily_plans (
@@ -147,6 +176,15 @@ export function initDatabase(): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+  `)
+  try { db.exec(`ALTER TABLE ai_usage ADD COLUMN cost_source TEXT DEFAULT 'unpriced'`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE ai_usage ADD COLUMN price_input REAL DEFAULT 0`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE ai_usage ADD COLUMN price_output REAL DEFAULT 0`) } catch { /* already exists */ }
+
+  db.exec(`
+    INSERT INTO question_fts_v2(question_id, ocr_text, reflection, source, error_type, level1, level2, level3)
+    SELECT q.id, q.ocr_text, q.reflection, q.source, q.error_type, q.level1, q.level2, q.level3
+    FROM questions q WHERE NOT EXISTS (SELECT 1 FROM question_fts_v2 f WHERE f.question_id = q.id)
   `)
 
   // Insert default tag tree if table is empty

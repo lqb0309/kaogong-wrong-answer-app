@@ -9,7 +9,6 @@ import {
   TagsOutlined,
   FileTextOutlined,
   SettingOutlined,
-  EditOutlined,
   FireOutlined,
   BookOutlined,
   FilePdfOutlined,
@@ -77,10 +76,9 @@ export function AppLayout() {
       label: '核心流程',
       children: [
         { key: '/plan', icon: <ScheduleOutlined />, label: '每日计划' },
-        { key: '/', icon: <HomeOutlined />, label: '成品库' },
+        { key: '/', icon: <HomeOutlined />, label: '错题处理' },
         pendingItem,
-        { key: '/questions', icon: <DatabaseOutlined />, label: '错题库' },
-        { key: '/manual', icon: <EditOutlined />, label: '手动入库' }
+        { key: '/questions', icon: <DatabaseOutlined />, label: '错题库' }
       ]
     },
     {

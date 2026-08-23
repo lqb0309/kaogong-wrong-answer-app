@@ -160,6 +160,7 @@ export function TestBuilderPage() {
         message.success(wrongIds.length === 0
           ? '本次全部做对，已记录答题结果'
           : `正确率 ${Math.round((res.accuracy || 0) * 100)}%，已回填 ${res.updated} 道错题并同步 ${res.cardBumps} 张知识卡片`)
+        if (res.completedPlanTask) message.success(`今日计划已自动完成：${res.completedPlanTask.title}`)
       } else {
         message.error(res.error || '回填失败')
       }

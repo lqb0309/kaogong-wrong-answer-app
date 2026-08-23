@@ -86,6 +86,7 @@ export function KnowledgePage() {
     if (r.success) {
       const labels = { wrong: '忘记了，明天再次复习', hard: '较难，已缩短复习间隔', done: '记得，已安排下次复习', easy: '很熟，已延长复习间隔' }
       message.success(`${labels[result]}${r.dueDate ? `（${r.dueDate}）` : ''}`)
+      if (r.completedPlanTask) message.success(`今日计划已自动完成：${r.completedPlanTask.title}`)
       setReviewCards((prev) => prev.filter((c: any) => c.file_path !== card.file_path))
       setReviewedToday((prev) => [...prev, card.file_path])
     } else {

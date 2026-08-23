@@ -6,6 +6,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { useTagTreeStore } from '@/stores/tag-tree'
 import { MarkdownRenderer } from '@/components/markdown-renderer'
 import { PageHeader } from '@/components/page-header'
+import { NewQuestionDrawer } from '@/components/new-question-drawer'
 
 interface Question {
   id: string
@@ -42,6 +43,7 @@ export function QuestionBankPage() {
   const [editForm] = Form.useForm()
   const [viewMode, setViewMode] = useState<'list' | 'group'>('list')
   const [editSaving, setEditSaving] = useState(false)
+  const [newQuestionOpen, setNewQuestionOpen] = useState(false)
   const { message } = App.useApp()
   const { tree, load: loadTree } = useTagTreeStore()
 
@@ -221,7 +223,8 @@ export function QuestionBankPage() {
         title="错题库"
         subtitle="已确认错题列表，支持筛选、编辑、同步 Vault"
         extra={
-          <Space>
+          <Space wrap>
+            <Button type="primary" onClick={() => setNewQuestionOpen(true)}>新建错题</Button>
             <Button icon={<SyncOutlined />} onClick={async () => {
               const res = await window.api.syncVault()
               message.info(res.message)
@@ -332,7 +335,7 @@ export function QuestionBankPage() {
           size="small"
           locale={{
             emptyText: (
-              <Empty description={search || level1Filter || level2Filter ? '没有符合条件的错题' : '还没有已确认的错题，去成品库分类入库吧'} image={Empty.PRESENTED_IMAGE_SIMPLE}>
+              <Empty description={search || level1Filter || level2Filter ? '没有符合条件的错题' : '还没有已确认的错题，去错题处理导入题目吧'} image={Empty.PRESENTED_IMAGE_SIMPLE}>
                 <Button type="primary" onClick={() => navigate('/')}>去上传</Button>
               </Empty>
             )
@@ -436,6 +439,8 @@ export function QuestionBankPage() {
           </Row>
         )}
       </Modal>
+
+      <NewQuestionDrawer open={newQuestionOpen} onClose={() => setNewQuestionOpen(false)} onCreated={() => fetchQuestions(1)} />
 
     </div>
   )

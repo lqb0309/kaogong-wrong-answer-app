@@ -12,6 +12,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { CanvasCrop } from '@/components/canvas-crop'
 import { PageHeader } from '@/components/page-header'
 import { SetupBanner } from '@/components/setup-banner'
+import { NewQuestionDrawer } from '@/components/new-question-drawer'
 
 interface LibItem {
   id: string
@@ -41,6 +42,7 @@ export function HomePage() {
   const [library, setLibrary] = useState<LibItem[]>([])
   const [selected, setSelected] = useState<string[]>([])
   const [importing, setImporting] = useState(false)
+  const [newQuestionOpen, setNewQuestionOpen] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number; fileName: string } | null>(null)
   const [cropTarget, setCropTarget] = useState<LibItem | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -109,7 +111,7 @@ export function HomePage() {
             traceId: result.traceId, fileName: `粘贴-${new Date().toLocaleTimeString()}.png`, status: 'pending',
             localAbsPath: result.localAbsPath
           })
-          message.success('图片已粘贴到成品库')
+          message.success('图片已加入处理队列')
           loadLibrary()
         } else {
           message.error(result.error || '剪贴板中无图片')
@@ -157,7 +159,7 @@ export function HomePage() {
       return items
     } catch (err: any) {
       console.error('loadLibrary error:', err)
-      message.error(`加载成品库失败: ${err.message}`)
+      message.error(`加载错题处理队列失败: ${err.message}`)
       return []
     }
   }
@@ -338,7 +340,7 @@ export function HomePage() {
   // 单题失败重试
   const retryClassify = useCallback(async (traceId: string, fileName: string) => {
     const item = library.find((q) => q.traceId === traceId && q.status === 'pending')
-    if (!item) { message.warning('该图片已不在成品库中'); return }
+    if (!item) { message.warning('该图片已不在处理队列中'); return }
     setClassifyJob({ traceId, fileName, stage: 'start', message: '重试中...', ts: Date.now() })
     await classifyItems([item])
   }, [library, classifyItems, message, setClassifyJob])
@@ -392,13 +394,14 @@ export function HomePage() {
   return (
     <div>
       <PageHeader
-        title="成品库"
-        subtitle="导入错题截图 → 批量 AI 分类 → 人工确认入库"
+        title="错题处理"
+        subtitle="导入题目 → AI 分类 → 人工确认入库"
         extra={
-          <Space>
+          <Space wrap>
             <Button icon={<PlusOutlined />} type="primary" onClick={handleImport} loading={importing}>
               {importing ? '导入中...' : '导入图片'}
             </Button>
+            <Button onClick={() => setNewQuestionOpen(true)}>新建错题</Button>
             <Button onClick={() => navigate('/pending')}>
               <Badge count={pendingCount} size="small" offset={[6, -2]}>
                 <ClockCircleOutlined /> 待确认
@@ -612,6 +615,7 @@ export function HomePage() {
         onSkip={handleCropSkip}
         onCancel={() => { setCropTarget(null) }}
       />
+      <NewQuestionDrawer open={newQuestionOpen} onClose={() => setNewQuestionOpen(false)} onCreated={() => loadLibrary()} />
     </div>
   )
 }

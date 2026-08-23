@@ -2,14 +2,13 @@ import { useEffect, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Typography, Card, Row, Col, Statistic, Table, Tag, Select, Space, Button, App, Spin, Progress, Empty, Segmented, DatePicker } from 'antd'
 import {
-  FileTextOutlined, FireOutlined,
-  CalendarOutlined, ReloadOutlined, ArrowUpOutlined, ArrowDownOutlined,
-  BulbOutlined, WarningOutlined, PlusCircleOutlined, ClockCircleOutlined, FilePdfOutlined
+  FileTextOutlined, CalendarOutlined, ReloadOutlined,
+  BulbOutlined, WarningOutlined, PlusCircleOutlined
 } from '@ant-design/icons'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   LineChart, Line, CartesianGrid, AreaChart, Area,
-  PieChart, Pie, Cell, Treemap
+  PieChart, Pie, Cell, Treemap, Legend
 } from 'recharts'
 import dayjs from 'dayjs'
 import { useSettingsStore } from '@/stores/settings'
@@ -17,6 +16,7 @@ import { PageHeader } from '@/components/page-header'
 
 const COLORS = ['#1677ff', '#52c41a', '#fa8c16', '#722ed1', '#eb2f96', '#13c2c2', '#f5222d', '#faad14']
 const CHART_COLORS = ['#1677ff', '#fa8c16', '#52c41a', '#722ed1']
+const { Text } = Typography
 
 interface StatsData {
   total: number; dailyAvg: number; todayCount: number
@@ -24,6 +24,10 @@ interface StatsData {
   byLevel1: any[]; byLevel2: any[]; byLevel3: any[]
   dailyStats: any[]; weeklyStats: any[]; monthlyStats: any[]
   topErrors: any[]; errorDist: any[]; errorTypeDist: any[]; confidenceDist: any
+  reviewedThisWeek: number; dueReviewCount: number; reviewWrongRate: number
+  latestAttempt: { accuracy: number; created_at: string } | null
+  reviewDaily: Array<{ date: string; cnt: number }>
+  weaknessPoints: Array<{ level1: string; level2: string; question_count: number; total_errors: number; repeated_count: number; last_error_at: string }>
 }
 
 export function StatsPage() {
@@ -37,7 +41,6 @@ export function StatsPage() {
   const [suggestionLoading, setSuggestionLoading] = useState(false)
   const [chartMode, setChartMode] = useState<string>('line')
   const [drillLevel1, setDrillLevel1] = useState<string | undefined>()
-  const [pendingCount, setPendingCount] = useState(0)
   const { get: getSetting } = useSettingsStore()
   const { message } = App.useApp()
 
@@ -47,7 +50,6 @@ export function StatsPage() {
       const data = await window.api.getStats()
       setStats(data)
     } catch { /* ignore */ }
-    window.api.getPendingCount().then(setPendingCount).catch(() => {})
     setLoading(false)
   }, [])
 
@@ -80,10 +82,9 @@ export function StatsPage() {
   }
 
   const threshold = Number(getSetting('weakness_threshold', '5'))
-  const recentTrend = stats.prev7 > 0 ? ((stats.recent7 - stats.prev7) / stats.prev7 * 100) : 0
-  const monthTrend = stats.prev30 > 0 ? ((stats.recent30 - stats.prev30) / stats.prev30 * 100) : 0
 
   // --- Derived chart data ---
+  const reviewByDay = new Map((stats.reviewDaily || []).map((item: any) => [item.date, item.cnt]))
   const dailyData = (stats.dailyStats || [])
     .filter((d: any) => {
       const days = (Date.now() - new Date(d.day).getTime()) / (1000 * 86400)
@@ -94,7 +95,7 @@ export function StatsPage() {
       }
       return days <= timeRange
     })
-    .map((d: any) => ({ day: d.day?.slice(5), count: d.cnt }))
+    .map((d: any) => ({ day: d.day?.slice(5), count: d.cnt, review: reviewByDay.get(d.day) || 0 }))
 
   // Moving average (3-day)
   const dailyWithMA = dailyData.map((d: any, i: number, arr: any[]) => {
@@ -148,40 +149,17 @@ export function StatsPage() {
     drillL3Grouped[d.level2].push(d)
   }
 
-  // --- Top error table columns ---
-  const topErrorColumns = [
-    { title: '题型', dataIndex: 'level1', width: 180, render: (_: any, r: any) => `${r.level1}/${r.level2}${r.level3 ? '/' + r.level3 : ''}` },
-    {
-      title: '错误次数', dataIndex: 'error_count', width: 80,
-      render: (v: number) => <Tag color={v >= threshold ? 'red' : v >= 2 ? 'orange' : 'default'}>{v}</Tag>
-    },
-    { title: '时间', dataIndex: 'created_at', width: 100, render: (v: string) => v?.slice(0, 10) },
-    {
-      title: '操作', width: 110,
-      render: (_: any, r: any) => (
-        <Space size={0}>
-          <Button size="small" type="link" onClick={async () => {
-            const vault = (await window.api.getConfig('obsidian_vault') || '').replace(/\/+$/, '')
-            if (r.obsidian_path && vault) {
-              const vaultName = vault.split('/').pop() || 'vault'
-              const uri = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(r.obsidian_path)}`
-              window.api.openExternal(uri)
-            } else {
-              message.info('未找到 Obsidian 文件路径')
-            }
-          }}>打开</Button>
-          {/* 学习闭环：薄弱题型一键组卷重做 */}
-          <Button size="small" type="link" icon={<FilePdfOutlined />}
-            onClick={() => navigate(`/test-builder?level1=${encodeURIComponent(r.level1)}&level2=${encodeURIComponent(r.level2 || '')}&level3=${encodeURIComponent(r.level3 || '')}`)}>
-            组卷
-          </Button>
-        </Space>
-      )
-    }
+  const weaknessColumns = [
+    { title: '知识点', key: 'point', render: (_: any, r: any) => <span>{r.level1} / {r.level2 || '未细分'}</span> },
+    { title: '错题', dataIndex: 'question_count', width: 64 },
+    { title: '累计错误', dataIndex: 'total_errors', width: 82, render: (v: number) => <Text strong style={{ color: v >= threshold ? '#ff4d4f' : '#fa8c16' }}>{v}</Text> },
+    { title: '重复出错', dataIndex: 'repeated_count', width: 82 },
+    { title: '状态', width: 80, render: (_: any, r: any) => <Tag color={r.total_errors >= threshold * 2 ? 'red' : r.total_errors >= threshold ? 'orange' : 'blue'}>{r.total_errors >= threshold * 2 ? '薄弱' : r.total_errors >= threshold ? '待巩固' : '新发现'}</Tag> },
+    { title: '操作', width: 82, render: (_: any, r: any) => <Button size="small" type="link" onClick={() => navigate(`/test-builder?level1=${encodeURIComponent(r.level1)}&level2=${encodeURIComponent(r.level2 || '')}`)}>专项组卷</Button> }
   ]
 
   return (
-    <div>
+    <div className="stats-dashboard">
       <PageHeader
         title="统计看板"
         subtitle="错题分布、趋势与薄弱点分析"
@@ -213,76 +191,45 @@ export function StatsPage() {
         </Card>
       )}
 
-      {/* Metric Cards（8 项指标） */}
-      <Row gutter={12} style={{ marginBottom: 12 }}>
-        <Col span={3}>
-          <Card size="small">
+      {/* Core learning indicators */}
+      <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+        <Col xs={12} lg={6}>
+          <Card size="small" className="stats-metric-card">
             <Statistic title="总错题数" value={stats.total} prefix={<FileTextOutlined />} />
           </Card>
         </Col>
-        <Col span={3}>
-          <Card size="small">
-            <Statistic title="今日新增" value={stats.todayCount || 0} prefix={<PlusCircleOutlined />}
-              valueStyle={{ color: stats.todayCount > 0 ? '#722ed1' : '#999' }} />
+        <Col xs={12} lg={6}>
+          <Card size="small" className="stats-metric-card">
+            <Statistic title="本周新增" value={stats.recent7} prefix={<PlusCircleOutlined />} suffix="题" />
+            <Text type="secondary">衡量学习投入，不判定好坏</Text>
           </Card>
         </Col>
-        <Col span={3}>
-          <Card size="small">
-            <Statistic title="本周新增" value={stats.recent7}
-              suffix={stats.prev7 > 0 ? (
-                <span style={{ fontSize: 12, color: stats.recent7 >= stats.prev7 ? '#ff4d4f' : '#52c41a' }}>
-                  {stats.recent7 >= stats.prev7 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
-                  {Math.abs(Math.round(recentTrend))}%
-                </span>
-              ) : ''}
-            />
+        <Col xs={12} lg={6}>
+          <Card size="small" className="stats-metric-card">
+            <Statistic title="本周已复习" value={stats.reviewedThisWeek || 0} prefix={<CalendarOutlined />} suffix="个" valueStyle={{ color: '#52c41a' }} />
+            <Text type="secondary">按知识卡片去重</Text>
           </Card>
         </Col>
-        <Col span={3}>
-          <Card size="small">
-            <Statistic title="本月新增" value={stats.recent30}
-              suffix={stats.prev30 > 0 ? (
-                <span style={{ fontSize: 12, color: monthTrend >= 0 ? '#ff4d4f' : '#52c41a' }}>
-                  {monthTrend >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
-                  {Math.abs(Math.round(monthTrend))}%
-                </span>
-              ) : ''}
-            />
-          </Card>
-        </Col>
-        <Col span={3}>
-          <Card size="small">
-            <Statistic title="日均入库" value={stats.dailyAvg} prefix={<CalendarOutlined />} valueStyle={{ fontSize: 24 }} />
-          </Card>
-        </Col>
-        <Col span={3}>
-          <Card size="small">
-            <Statistic title="高频题型" value={stats.byLevel1?.[0]?.level1 || '-'}
-              suffix={stats.byLevel1?.[0] ? <span style={{ fontSize: 12 }}>{stats.byLevel1[0].pct}%</span> : ''}
-              prefix={<FireOutlined />} valueStyle={{ fontSize: 18 }} />
-          </Card>
-        </Col>
-        <Col span={3}>
-          <Card size="small">
-            <Statistic title="薄弱预警" value={stats.topErrors?.filter((e: any) => e.error_count >= threshold).length || 0}
-              suffix={<span style={{ fontSize: 12 }}>{threshold}次以上</span>}
-              prefix={<WarningOutlined />} valueStyle={{ color: '#ff4d4f', fontSize: 24 }} />
-          </Card>
-        </Col>
-        <Col span={3}>
-          <Card size="small">
-            <Statistic title="待确认" value={pendingCount} prefix={<ClockCircleOutlined />}
-              valueStyle={{ color: pendingCount > 0 ? '#1677ff' : '#999', fontSize: 24 }} />
+        <Col xs={12} lg={6}>
+          <Card size="small" className="stats-metric-card">
+            <Statistic title="待巩固知识点" value={(stats.weaknessPoints || []).filter(p => p.total_errors >= threshold).length} prefix={<WarningOutlined />} suffix="个" valueStyle={{ color: '#ff4d4f' }} />
+            <Text type="secondary">累计错误达到 {threshold} 次</Text>
           </Card>
         </Col>
       </Row>
 
+      <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+        <Col xs={24} md={8}><Card size="small"><Statistic title="到期未复习" value={stats.dueReviewCount || 0} suffix="个" valueStyle={{ color: stats.dueReviewCount ? '#fa8c16' : '#52c41a' }} /></Card></Col>
+        <Col xs={24} md={8}><Card size="small"><Statistic title="近 30 天复习再错率" value={stats.reviewWrongRate || 0} suffix="%" valueStyle={{ color: stats.reviewWrongRate > 30 ? '#ff4d4f' : '#52c41a' }} /></Card></Col>
+        <Col xs={24} md={8}><Card size="small"><Statistic title="最近组卷正确率" value={stats.latestAttempt ? Math.round(stats.latestAttempt.accuracy * 100) : 0} suffix="%" /><Text type="secondary">{stats.latestAttempt ? stats.latestAttempt.created_at?.slice(0, 10) : '暂无组卷记录'}</Text></Card></Col>
+      </Row>
+
       {/* Chart Row 1: Trend + Distribution */}
-      <Row gutter={12} style={{ marginBottom: 12 }}>
-        <Col span={14}>
+      <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+        <Col xs={24} xl={14}>
           <Card
             title="错题趋势"
-            size="small"
+            size="small" className="stats-chart-card"
             extra={
               <Space size={4} wrap>
                 <Segmented size="small" value={chartMode} onChange={setChartMode}
@@ -318,8 +265,8 @@ export function StatsPage() {
                   <XAxis dataKey="day" fontSize={10} interval="preserveStartEnd" />
                   <YAxis allowDecimals={false} fontSize={10} />
                   <Tooltip />
-                  <Area type="monotone" dataKey="count" stroke="#1677ff" fill="url(#colorCount)" strokeWidth={2} name="入库数" />
-                  <Line type="monotone" dataKey="ma" stroke="#ff7a45" strokeWidth={1.5} strokeDasharray="5 5" dot={false} name="3日均线" />
+                  <Area type="monotone" dataKey="count" stroke="#1677ff" fill="url(#colorCount)" strokeWidth={2} name="新增错题" />
+                  <Line type="monotone" dataKey="review" stroke="#52c41a" strokeWidth={2} dot={false} name="完成复习" />
                 </AreaChart>
               ) : (
                 <BarChart data={weekData}>
@@ -334,23 +281,22 @@ export function StatsPage() {
           </Card>
         </Col>
 
-        <Col span={10}>
-          <Card title="一级分类占比" size="small">
+        <Col xs={24} xl={10}>
+          <Card title="一级分类占比" size="small" className="stats-chart-card">
             <ResponsiveContainer width="100%" height={260}>
               <PieChart>
                 <Pie
                   data={pieData}
                   cx="50%" cy="50%"
-                  innerRadius={45} outerRadius={85}
+                  innerRadius={48} outerRadius={78}
                   paddingAngle={3} dataKey="value"
-                  label={({ name, percent }: any) => `${name} ${(percent * 100).toFixed(0)}%`}
-                  labelLine={{ strokeWidth: 1 }}
                 >
                   {pieData.map((_, i) => (
                     <Cell key={i} fill={COLORS[i % COLORS.length]} />
                   ))}
                 </Pie>
                 <Tooltip formatter={(value: any, name: any) => [`${value} 题`, name]} />
+                <Legend verticalAlign="bottom" iconType="circle" wrapperStyle={{ fontSize: 12 }} />
               </PieChart>
             </ResponsiveContainer>
           </Card>
@@ -358,11 +304,11 @@ export function StatsPage() {
       </Row>
 
       {/* Row 2: Bar chart + Error distribution + Confidence + Error type */}
-      <Row gutter={12} style={{ marginBottom: 12 }}>
-        <Col span={6}>
-          <Card title="各分类错题数" size="small">
+      <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+        <Col xs={24} md={12} xl={6}>
+          <Card title="各分类错题数" size="small" className="stats-chart-card">
             <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={barData} layout="horizontal" margin={{ left: 0 }}>
+              <BarChart data={barData} layout="vertical" margin={{ left: 4, right: 8 }}>
                 <XAxis type="number" fontSize={10} />
                 <YAxis type="category" dataKey="name" width={70} fontSize={10} />
                 <Tooltip formatter={(v: any) => [`${v} 题`, '数量']} />
@@ -371,8 +317,8 @@ export function StatsPage() {
             </ResponsiveContainer>
           </Card>
         </Col>
-        <Col span={6}>
-          <Card title="错误次数分布" size="small">
+        <Col xs={24} md={12} xl={6}>
+          <Card title="错误次数分布" size="small" className="stats-chart-card">
             <ResponsiveContainer width="100%" height={220}>
               <PieChart>
                 <Pie
@@ -380,19 +326,19 @@ export function StatsPage() {
                   cx="50%" cy="50%"
                   innerRadius={30} outerRadius={70}
                   paddingAngle={4} dataKey="count"
-                  label={({ name, percent }: any) => `${name} ${(percent * 100).toFixed(0)}%`}
                 >
                   {errDistData.map((_, i) => (
                     <Cell key={i} fill={CHART_COLORS[i]} />
                   ))}
                 </Pie>
                 <Tooltip />
+                <Legend verticalAlign="bottom" iconType="circle" wrapperStyle={{ fontSize: 11 }} />
               </PieChart>
             </ResponsiveContainer>
           </Card>
         </Col>
-        <Col span={6}>
-          <Card title="置信度分布" size="small">
+        <Col xs={24} md={12} xl={6}>
+          <Card title="置信度分布" size="small" className="stats-chart-card">
             <ResponsiveContainer width="100%" height={220}>
               <PieChart>
                 <Pie
@@ -400,19 +346,19 @@ export function StatsPage() {
                   cx="50%" cy="50%"
                   innerRadius={30} outerRadius={70}
                   paddingAngle={4} dataKey="value"
-                  label={({ name, percent }: any) => `${name} ${(percent * 100).toFixed(0)}%`}
                 >
                   {confidenceData.map((d, i) => (
                     <Cell key={i} fill={d.color} />
                   ))}
                 </Pie>
                 <Tooltip />
+                <Legend verticalAlign="bottom" iconType="circle" wrapperStyle={{ fontSize: 11 }} />
               </PieChart>
             </ResponsiveContainer>
           </Card>
         </Col>
-        <Col span={6}>
-          <Card title="错误类型分布" size="small">
+        <Col xs={24} md={12} xl={6}>
+          <Card title="错误类型分布" size="small" className="stats-chart-card">
             {(stats.errorTypeDist || []).length === 0 ? (
               <Empty description="暂无错误类型数据" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 40 }} />
             ) : (
@@ -439,8 +385,8 @@ export function StatsPage() {
             options={(stats.byLevel1 || []).map((l: any) => ({ value: l.level1, label: `${l.level1} (${l.cnt})` }))} />
         }
       >
-        <Row gutter={12}>
-          <Col span={10}>
+        <Row gutter={[20, 16]}>
+          <Col xs={24} xl={10}>
             <Typography.Text strong style={{ fontSize: 13, marginBottom: 8, display: 'block' }}>二级分类分布</Typography.Text>
             {drillL2.length === 0 ? (
               <Empty description="暂无数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
@@ -459,7 +405,7 @@ export function StatsPage() {
               </ResponsiveContainer>
             )}
           </Col>
-          <Col span={14}>
+          <Col xs={24} xl={14}>
             <Typography.Text strong style={{ fontSize: 13, marginBottom: 8, display: 'block' }}>三级考点明细</Typography.Text>
             {drillL3.length === 0 ? (
               <Empty description="暂无三级分类数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
@@ -502,9 +448,9 @@ export function StatsPage() {
       </Card>
 
       {/* Row 4: Treemap + Weakness Table */}
-      <Row gutter={12}>
-        <Col span={10}>
-          <Card title="二级题型分布 (Treemap)" size="small">
+      <Row gutter={[12, 12]}>
+        <Col xs={24} xl={10}>
+          <Card title="二级题型分布" size="small" className="stats-chart-card">
             <ResponsiveContainer width="100%" height={300}>
               <Treemap data={treemapData} dataKey="size" aspectRatio={4 / 3} stroke="#fff" fill="#1677ff">
                 <Tooltip formatter={(v: any, _name: any, props: any) => [`${v} 题`, props.payload.name]} />
@@ -512,9 +458,9 @@ export function StatsPage() {
             </ResponsiveContainer>
           </Card>
         </Col>
-        <Col span={14}>
+        <Col xs={24} xl={14}>
           <Card
-            title="高频错题 TOP"
+            title="薄弱知识点"
             size="small"
             extra={
               <Space size={4}>
@@ -527,12 +473,12 @@ export function StatsPage() {
             }
           >
             <Table
-              dataSource={(stats.topErrors || []).filter((e: any) => !level1Filter || e.level1 === level1Filter)}
-              columns={topErrorColumns}
-              rowKey="id"
+              dataSource={(stats.weaknessPoints || []).filter((e: any) => !level1Filter || e.level1 === level1Filter)}
+              columns={weaknessColumns}
+              rowKey={(r: any) => `${r.level1}/${r.level2}`}
               size="small"
               pagination={false}
-              scroll={{ y: 260 }}
+              scroll={{ x: 520, y: 260 }}
             />
           </Card>
         </Col>

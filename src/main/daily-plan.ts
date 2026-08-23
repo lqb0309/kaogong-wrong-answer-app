@@ -3,6 +3,7 @@ import { readConfig, writeConfig } from './config'
 import { decryptToken } from './safe-storage'
 import { logger } from './logger'
 import OpenAI from 'openai'
+import { recordAiUsage } from './ai-usage'
 
 // ============ 每日备考计划（AI 动态调整） ============
 
@@ -363,6 +364,7 @@ async function adjustWithAi(prev: DailyPlan, today: string): Promise<{ plan: Dai
       response_format: { type: 'json_object' },
       max_tokens: 2500
     })
+    recordAiUsage(resp, 'daily_plan', reasonKey ? 'reason' : 'vision', model)
 
     const content = resp.choices[0]?.message?.content || ''
     let parsed: any
@@ -493,6 +495,27 @@ export function updatePlanTask(dateStr: string, taskId: string, done: boolean): 
   return plan
 }
 
+export function completePlanTaskForActivity(activity: 'review' | 'test', modules: string[], quantity: number): PlanTask | null {
+  const today = localDateStr()
+  const plan = loadPlan(today)
+  if (!plan) return null
+  const normalized = new Set(modules.filter(Boolean))
+  const eligible = activity === 'review'
+    ? quantity >= Math.max(1, Number(readConfig('review_daily_count') || 5))
+    : quantity >= 10
+  if (!eligible) return null
+  const candidate = plan.tasks.find(task => {
+    if (task.done) return false
+    if (activity === 'review') return task.module === '复盘' && /复盘|错题/.test(task.title)
+    return normalized.has(task.module) && /题|模拟|练习|套卷/.test(task.title)
+  })
+  if (!candidate) return null
+  const updated = updatePlanTask(today, candidate.id, true)
+  const completed = updated?.tasks.find(task => task.id === candidate.id) || null
+  if (completed) logger.info('daily_plan', 'activity_auto_complete', `学习行为自动完成计划: ${completed.title}`, { activity, quantity, modules })
+  return completed
+}
+
 /** 提交当天完成反馈（状态 + 备注），并预生成明天的计划（供次日 AI 调整使用） */
 export function submitPlanFeedback(dateStr: string, status: PlanStatus, note: string): DailyPlan | null {
   const plan = loadPlan(dateStr)
@@ -596,6 +619,7 @@ ${stats.byLevel1.length ? stats.byLevel1.join('\n') : '（无）'}（共 ${stats
       response_format: { type: 'json_object' },
       max_tokens: 2500
     })
+    recordAiUsage(resp, 'forward_plan', reasonKey ? 'reason' : 'vision', model)
 
     const content = resp.choices[0]?.message?.content || ''
     const parsed = JSON.parse(content)

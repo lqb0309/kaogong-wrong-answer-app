@@ -157,7 +157,7 @@ export function PendingPage() {
 
   const handleSkip = useCallback(() => {
     if (!current) return
-    // 跳过 → 状态回退为待分类，回到成品库可重新分类或再次送入待确认
+    // 跳过 → 状态回退为待分类，回到错题处理可重新分类或再次送入待确认
     window.api.updateQuestionStatus(current.id, 'pending').catch(() => {})
     setSessionStats((s) => ({ ...s, skipped: s.skipped + 1 }))
     removeItem(current.id)

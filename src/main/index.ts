@@ -111,5 +111,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  logger.info('system', 'app_quit', '应用关闭', { uptime: process.uptime() })
+  try {
+    if (getDb()?.open) logger.info('system', 'app_quit', '应用关闭', { uptime: process.uptime() })
+  } catch { /* restore flow may already have closed the database */ }
 })

@@ -3,6 +3,7 @@
 interface ElectronApi {  getConfig: (key: string) => Promise<string | undefined>
   createBackup: () => Promise<{ success: boolean; backup: { name: string; path: string; createdAt: string; size: number } }>
   listBackups: () => Promise<Array<{ name: string; path: string; createdAt: string; size: number }>>
+  restoreBackup: (name: string) => Promise<{ success: boolean; restarting: boolean }>
   getAllConfig: () => Promise<Record<string, string>>
   setConfig: (key: string, value: string) => Promise<void>
   readFile: (filePath: string) => Promise<string>
@@ -16,6 +17,12 @@ interface ElectronApi {  getConfig: (key: string) => Promise<string | undefined>
   getAiSuggestion: (statsData: any) => Promise<{ success: boolean; suggestion?: string; error?: string }>
   generateReflection: (params: { level1: string; level2?: string; level3?: string | null; ocrText: string; traceId?: string }) => Promise<{ success: boolean; reflection?: string; error?: string }>
   fetchModels: (baseURL: string, apiKey: string) => Promise<{ success: boolean; models?: string[]; error?: string }>
+  getAiUsage: (days?: number) => Promise<{ days: number; totals: { calls: number; prompt_tokens: number; completion_tokens: number; total_tokens: number; estimated_cost: number }; byFeature: Array<{ feature: string; calls: number; total_tokens: number; estimated_cost: number }> }>
+  getBillingOverview: () => Promise<{
+    usage: { today: { calls: number; tokens: number; cost: number; unpriced: number }; month: { calls: number; tokens: number; cost: number; unpriced: number } }
+    ccSwitch: { detected: boolean; path: string; modelCount: number; modifiedAt: string | null; error?: string }
+    balance: { available: boolean; provider: string; balances: Array<{ currency: string; total: string; granted: string; toppedUp: string }>; error?: string }
+  }>
   testConnection: (baseURL: string, apiKey: string, model: string) => Promise<{ success: boolean; latency?: number; modelUsed?: string; preview?: string; error?: string }>
   writeToObsidian: (questionData: any) => Promise<any>
   checkObsidianOnline: () => Promise<boolean>
@@ -28,6 +35,7 @@ interface ElectronApi {  getConfig: (key: string) => Promise<string | undefined>
   getQuestion: (id: string) => Promise<any>
   deleteQuestion: (id: string) => Promise<void>
   getPendingCount: () => Promise<number>
+  createManualQuestion: (data: { imageUrl?: string; level1: string; level2?: string; level3?: string; ocrText?: string; errorCount?: number; source?: string; mode: 'direct' | 'review' }) => Promise<{ success: boolean; id?: string; pendingReview?: boolean; error?: string }>
   updateQuestionStatus: (id: string, status: string) => Promise<void>
   updateQuestion: (id: string, updates: Record<string, any>) => Promise<{ success: boolean }>
   getStats: () => Promise<any>
@@ -113,12 +121,12 @@ interface ElectronApi {  getConfig: (key: string) => Promise<string | undefined>
   getDailyNotes: () => Promise<{ success: boolean; error?: string; notes: Array<{ date: string; file_path: string; title: string; total_questions: number; preview: string }> }>
   getDailyNoteContent: (date: string) => Promise<{ success: boolean; content?: string; error?: string }>
   getReviewQueue: (count?: number) => Promise<{ success: boolean; error?: string; cards: Array<{ title: string; file_path: string; knowledge_type: string; level1: string; level2: string; level3: string | null; error_count: number; last_seen: string; score: number }>; reviewedToday: string[] }>
-  markReview: (cardPath: string, result: 'done' | 'wrong' | 'hard' | 'easy') => Promise<{ success: boolean; error?: string; cardBumped?: boolean; intervalDays?: number; dueDate?: string }>
+  markReview: (cardPath: string, result: 'done' | 'wrong' | 'hard' | 'easy') => Promise<{ success: boolean; error?: string; cardBumped?: boolean; intervalDays?: number; dueDate?: string; completedPlanTask?: { title: string } | null }>
   getCardQuestions: (cardPath: string) => Promise<{ success: boolean; error?: string; questions: any[] }>
   selectTestQuestions: (params?: { ids?: string[]; level1?: string; level2?: string; level3?: string; search?: string; limit?: number; random?: boolean }) => Promise<{ success: boolean; error?: string; questions: any[] }>
   generateTestPdf: (questionIds: string[], options?: { title?: string; showAnswers?: boolean; questionsPerPage?: number; pageSize?: string; includeAnswerSheet?: boolean; imageMode?: 'graphics_only' | 'full' }) => Promise<{ success: boolean; filePath?: string; error?: string; imageErrors: string[] }>
   selectFromReviewQueue: (count?: number) => Promise<{ success: boolean; error?: string; ids: string[]; cards: any[] }>
-  markTestAnswers: (wrongIds: string[], questionIds?: string[]) => Promise<{ success: boolean; error?: string; updated?: number; cardBumps?: number; totalCount?: number; accuracy?: number }>
+  markTestAnswers: (wrongIds: string[], questionIds?: string[]) => Promise<{ success: boolean; error?: string; updated?: number; cardBumps?: number; totalCount?: number; accuracy?: number; completedPlanTask?: { title: string } | null }>
   getTestAttempts: (limit?: number) => Promise<Array<{ id: string; question_ids: string; wrong_ids: string; total_count: number; wrong_count: number; accuracy: number; created_at: string }>>
   openExternal: (path: string) => Promise<void>
   getAppVersion: () => Promise<string>

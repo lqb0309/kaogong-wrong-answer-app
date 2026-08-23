@@ -4,6 +4,7 @@ import { getTagTree } from './tag-service'
 import { logger } from './logger'
 import { generateTraceId, toImageUrl } from './utils'
 import OpenAI from 'openai'
+import { recordAiUsage } from './ai-usage'
 
 interface ClassifyResult {
   level1: string
@@ -79,6 +80,7 @@ export async function classifyImage(imageUrl: string, traceId?: string, onProgre
         response_format: { type: 'json_object' },
         max_tokens: 2000
       })
+      recordAiUsage(resp, 'classify', 'vision', visionModel)
 
       const duration = Date.now() - startTime
       const content = resp.choices[0]?.message?.content || '{}'
@@ -128,6 +130,7 @@ export async function classifyImage(imageUrl: string, traceId?: string, onProgre
       response_format: { type: 'json_object' },
       max_tokens: 2000
     })
+    recordAiUsage(visionResp, 'ocr', 'vision', visionModel)
 
     const visionContent = visionResp.choices[0]?.message?.content || '{}'
     visionResult = JSON.parse(visionContent)
@@ -172,6 +175,7 @@ ${imageDescription ? `【题目分析】\n${imageDescription}\n` : ''}
       response_format: { type: 'json_object' },
       max_tokens: 1500
     })
+    recordAiUsage(classifyResp, 'classify', 'reason', reasonModel)
 
     const totalDuration = Date.now() - startTime
     const content = classifyResp.choices[0]?.message?.content || '{}'
@@ -373,6 +377,7 @@ export async function getAiSuggestion(statsData: any): Promise<string> {
       ],
       max_tokens: 1200
     })
+    recordAiUsage(resp, 'suggestion', 'vision', visionModel)
     return resp.choices[0]?.message?.content || '无法生成建议'
   }
 
@@ -385,6 +390,7 @@ export async function getAiSuggestion(statsData: any): Promise<string> {
     ],
     max_tokens: 1200
   })
+  recordAiUsage(resp, 'suggestion', 'reason', reasonModel)
   return resp.choices[0]?.message?.content || '无法生成建议'
 }
 
@@ -478,6 +484,7 @@ ${params.ocrText || '（无OCR文本，请根据题目类型给出通用解法�
         messages: [{ role: 'user', content: prompt }],
         max_tokens: 8192
       })
+      recordAiUsage(resp, 'reflection', reasonKey ? 'reason' : 'vision', model)
 
       const msg = resp.choices[0]?.message as any
       const result = msg?.content || msg?.reasoning_content || ''

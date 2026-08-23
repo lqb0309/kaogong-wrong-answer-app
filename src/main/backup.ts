@@ -46,3 +46,19 @@ export function pruneBackups(keep = 14): void {
     fs.removeSync(item.path)
   }
 }
+
+export async function restoreDatabaseBackup(name: string): Promise<void> {
+  const backup = listDatabaseBackups().find(item => item.name === name)
+  if (!backup) throw new Error('备份不存在或不属于本应用')
+  const restoreSource = path.join(app.getPath('userData'), 'restore-source.db')
+  fs.copyFileSync(backup.path, restoreSource)
+  await createDatabaseBackup('before-restore')
+  const dbPath = path.join(app.getPath('userData'), 'data.db')
+  const db = getDb()
+  db.pragma('wal_checkpoint(TRUNCATE)')
+  db.close()
+  fs.copyFileSync(restoreSource, dbPath)
+  fs.removeSync(restoreSource)
+  fs.removeSync(`${dbPath}-wal`)
+  fs.removeSync(`${dbPath}-shm`)
+}

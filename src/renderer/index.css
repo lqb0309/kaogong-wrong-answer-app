@@ -53,3 +53,24 @@ body {
 }
 .markdown-body .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
 .markdown-body input[type="checkbox"] { margin-right: 6px; }
+
+/* Statistics dashboard: keep cards and charts stable across window sizes. */
+.stats-dashboard { min-width: 0; }
+.stats-dashboard .ant-col { min-width: 0; }
+.stats-metric-card { height: 100%; min-height: 104px; }
+.stats-metric-card .ant-card-body { height: 100%; display: flex; align-items: center; }
+.stats-metric-card .ant-statistic { width: 100%; min-width: 0; }
+.stats-metric-card .ant-statistic-content { display: flex; align-items: baseline; min-width: 0; white-space: nowrap; }
+.stats-metric-text .ant-statistic-content-value { overflow: hidden; text-overflow: ellipsis; }
+.stats-chart-card { height: 100%; overflow: hidden; }
+.stats-chart-card .ant-card-body { min-width: 0; overflow: hidden; }
+.stats-dashboard .ant-card-head-wrapper { min-width: 0; }
+.stats-dashboard .ant-card-head-title { min-width: 0; }
+.stats-dashboard .recharts-responsive-container { min-width: 0; }
+
+@media (max-width: 900px) {
+  .stats-dashboard .ant-card-head { min-height: 44px; padding: 0 12px; }
+  .stats-dashboard .ant-card-head-wrapper { flex-wrap: wrap; padding: 8px 0; gap: 8px; }
+  .stats-dashboard .ant-card-extra { margin-left: 0; max-width: 100%; }
+  .stats-dashboard .ant-picker-range { max-width: 100%; }
+}
