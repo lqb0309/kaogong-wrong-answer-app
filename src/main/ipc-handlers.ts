@@ -10,9 +10,13 @@ import { generateTraceId } from './utils'
 import { scanExistingCards, writeInductionResults, readCardContent, scanDailyNotes, readDailyNote, bumpCardError, findQuestionsForCard, findCardPathsForQuestion, parseCategoryFromPath, getReviewQueueCards } from './knowledge-cards'
 import { fetchQuestionsForTest, generatePdf } from './pdf-generator'
 import { queueSize, flushVaultQueue } from './retry-queue'
+import { ensureTodayPlan, updatePlanTask, submitPlanFeedback, getPlanHistory, regenerateTodayPlan, getExamInfo, getExamPhase, getStoredForwardPlan, generateForwardPlan } from './daily-plan'
 import fs from 'fs-extra'
 import path from 'path'
 import crypto from 'crypto'
+import { localDateKey } from './date-utils'
+import { createDatabaseBackup, listDatabaseBackups } from './backup'
+import dayjs from 'dayjs'
 
 export function registerIpcHandlers(): void {
   // ============ Config ============
@@ -40,6 +44,8 @@ export function registerIpcHandlers(): void {
 
   // Shell / Dialog / File
   ipcMain.handle('app:version', () => app.getVersion())
+  ipcMain.handle('backup:create', async () => ({ success: true, backup: await createDatabaseBackup('manual') }))
+  ipcMain.handle('backup:list', () => listDatabaseBackups())
 
   // 渲染进程异常上报（PRD 埋点：未捕获异常）
   ipcMain.handle('log:rendererError', (_e, errorText: string) => {
@@ -378,7 +384,7 @@ export function registerIpcHandlers(): void {
     const pendingCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'pending'")
     const classifiedCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'classified'")
     const confirmedCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'confirmed'")
-    const today = new Date().toISOString().slice(0, 10)
+    const today = localDateKey()
     const todayCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'confirmed' AND date(confirmed_at) = ?", today)
     const days = db.prepare('SELECT date FROM login_days ORDER BY date DESC').all() as { date: string }[]
     let streak = 0
@@ -404,11 +410,12 @@ export function registerIpcHandlers(): void {
     for (const q of questions) {
       const fullPath = `${vaultRoot}/${q.obsidian_path}`
       if (!fs.existsSync(fullPath)) {
-        db.prepare('DELETE FROM questions WHERE id = ?').run(q.id)
+        db.prepare("UPDATE questions SET sync_status = 'missing', sync_error = ? WHERE id = ?")
+          .run('Vault 中未找到对应笔记；数据库记录已保留', q.id)
         deleted++
       }
     }
-    return { deleted, message: `校验完成：清理 ${deleted} 条孤儿记录` }
+    return { deleted: 0, missing: deleted, message: `校验完成：发现 ${deleted} 条缺失笔记，数据库记录均已保留` }
   })
   ipcMain.handle('obsidian:write', async (_e, questionData: any) => saveMarkdown(questionData))
   ipcMain.handle('obsidian:check', async () => vaultOnline())
@@ -424,7 +431,11 @@ export function registerIpcHandlers(): void {
     if (level1) { conditions.push('level1 = ?'); values.push(level1) }
     if (level2) { conditions.push('level2 = ?'); values.push(level2) }
     if (level3) { conditions.push('level3 = ?'); values.push(level3) }
-    if (search) { conditions.push('(ocr_text LIKE ? OR source LIKE ?)'); const s = `%${search}%`; values.push(s, s) }
+    if (search) {
+      conditions.push('(ocr_text LIKE ? OR reflection LIKE ? OR source LIKE ? OR error_type LIKE ? OR level1 LIKE ? OR level2 LIKE ? OR level3 LIKE ?)')
+      const s = `%${search}%`
+      values.push(s, s, s, s, s, s, s)
+    }
     const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : ''
     const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM questions${whereClause}`).get(...values) as { cnt: number }
     const total = countRow.cnt
@@ -632,7 +643,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('knowledge:overview', (_e, date?: string) => {
     const db = getDb()
-    const targetDate = date || new Date().toISOString().slice(0, 10)
+    const targetDate = date || localDateKey()
 
     // 1. Today's confirmed questions
     const todayQuestions = db.prepare(`
@@ -717,7 +728,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('knowledge:induct', async (e, date?: string) => {
     const db = getDb()
-    const targetDate = date || new Date().toISOString().slice(0, 10)
+    const targetDate = date || localDateKey()
 
     // Get target date's confirmed questions
     const todayQuestions = db.prepare(`
@@ -729,7 +740,7 @@ export function registerIpcHandlers(): void {
     `).all(targetDate) as any[]
 
     if (todayQuestions.length === 0) {
-      return { success: false, error: `${targetDate === new Date().toISOString().slice(0, 10) ? '今天' : targetDate} 还没有已确认的错题。` }
+      return { success: false, error: `${targetDate === localDateKey() ? '今天' : targetDate} 还没有已确认的错题。` }
     }
 
     // Scan existing knowledge cards from vault
@@ -833,7 +844,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('knowledge:reviewDone', (_e, cardPath: string, result: string) => {
     try {
       const db = getDb()
-      const today = new Date().toISOString().slice(0, 10)
+      const today = localDateKey()
       db.prepare('INSERT INTO review_log (card_path, date, result, created_at) VALUES (?, ?, ?, ?)')
         .run(cardPath, today, result || 'done', new Date().toISOString())
       let cardBumped = false
@@ -841,8 +852,25 @@ export function registerIpcHandlers(): void {
         const r = bumpCardError(cardPath)
         cardBumped = r.success
       }
+      const previous = db.prepare('SELECT interval_days, repetitions, lapses FROM review_state WHERE card_path = ?').get(cardPath) as { interval_days: number; repetitions: number; lapses: number } | undefined
+      const oldInterval = previous?.interval_days || 0
+      const rating = ['wrong', 'hard', 'done', 'easy'].includes(result) ? result : 'done'
+      const intervalDays = rating === 'wrong' ? 1
+        : rating === 'hard' ? Math.max(1, Math.round(Math.max(1, oldInterval) * 1.2))
+          : rating === 'easy' ? Math.max(4, Math.round(Math.max(2, oldInterval) * 2.5))
+            : Math.max(2, Math.round(Math.max(1, oldInterval) * 2))
+      const dueDate = dayjs().add(intervalDays, 'day').format('YYYY-MM-DD')
+      db.prepare(`INSERT INTO review_state
+        (card_path, interval_days, repetitions, lapses, last_rating, last_reviewed_at, due_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(card_path) DO UPDATE SET interval_days = excluded.interval_days,
+          repetitions = excluded.repetitions, lapses = excluded.lapses,
+          last_rating = excluded.last_rating, last_reviewed_at = excluded.last_reviewed_at,
+          due_date = excluded.due_date`)
+        .run(cardPath, intervalDays, (previous?.repetitions || 0) + 1,
+          (previous?.lapses || 0) + (rating === 'wrong' ? 1 : 0), rating, new Date().toISOString(), dueDate)
       logger.info('knowledge', 'review_done', `复习完成: ${cardPath}`, { result, cardBumped })
-      return { success: true, cardBumped }
+      return { success: true, cardBumped, intervalDays, dueDate }
     } catch (err: any) {
       return { success: false, error: err.message }
     }
@@ -884,11 +912,12 @@ export function registerIpcHandlers(): void {
   })
 
   // 对答案回填：做错的题错误计数 +1，并同步到匹配的知识卡片（闭环）
-  ipcMain.handle('test:markAnswers', (_e, wrongIds: string[]) => {
+  ipcMain.handle('test:markAnswers', (_e, wrongIds: string[], questionIds?: string[]) => {
     try {
       const db = getDb()
       const vaultRoot = readConfig('obsidian_vault') || ''
       const ids = Array.isArray(wrongIds) ? wrongIds : []
+      const allIds = Array.isArray(questionIds) ? Array.from(new Set(questionIds)) : ids
       let updated = 0
       let cardBumps = 0
       const bumpedCards = new Set<string>()
@@ -917,11 +946,22 @@ export function registerIpcHandlers(): void {
           if (r.success) cardBumps++
         }
       }
-      logger.info('test', 'answers_marked', `对答案回填完成: ${updated} 道错题`, { cardBumps })
-      return { success: true, updated, cardBumps }
+      const totalCount = allIds.length
+      const accuracy = totalCount > 0 ? (totalCount - ids.length) / totalCount : 0
+      db.prepare(`INSERT INTO test_attempts
+        (id, question_ids, wrong_ids, total_count, wrong_count, accuracy, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(crypto.randomUUID(), JSON.stringify(allIds), JSON.stringify(ids), totalCount, ids.length, accuracy, new Date().toISOString())
+      logger.info('test', 'answers_marked', `对答案回填完成: ${updated} 道错题`, { cardBumps, totalCount, accuracy })
+      return { success: true, updated, cardBumps, totalCount, accuracy }
     } catch (err: any) {
       return { success: false, error: err.message }
     }
+  })
+
+  ipcMain.handle('test:attempts', (_e, limit?: number) => {
+    const safeLimit = Math.min(100, Math.max(1, Number(limit) || 20))
+    return getDb().prepare('SELECT * FROM test_attempts ORDER BY created_at DESC LIMIT ?').all(safeLimit)
   })
 
   ipcMain.handle('test:selectQuestions', (_e, params: {
@@ -976,6 +1016,43 @@ export function registerIpcHandlers(): void {
       return { success: false, error: err.message, imageErrors: [] }
     }
   })
+
+  // ============ 每日备考计划（AI 动态调整 + 倒排） ============
+  ipcMain.handle('plan:getToday', async () => {
+    try {
+      const plan = await ensureTodayPlan()
+      return {
+        success: true,
+        plan,
+        exam: getExamInfo(),
+        phase: getExamPhase(),
+        future_note: readConfig('plan_future_note') || '',
+        forward_plan: getStoredForwardPlan(),
+        recent: getPlanHistory(7)
+      }
+    } catch (err: any) {
+      logger.error('daily_plan', 'get_today_failed', err.message)
+      return { success: false, error: err.message, plan: null, exam: getExamInfo(), phase: getExamPhase(), future_note: '', forward_plan: null, recent: [] }
+    }
+  })
+  ipcMain.handle('plan:updateTask', (_e, date: string, taskId: string, done: boolean) => {
+    const plan = updatePlanTask(date, taskId, done)
+    return { success: !!plan, plan }
+  })
+  ipcMain.handle('plan:submitFeedback', (_e, date: string, status: string, note: string) => {
+    const valid = (['pending', 'partial', 'completed'] as const).includes(status as any) ? status as 'pending' | 'partial' | 'completed' : 'partial'
+    const plan = submitPlanFeedback(date, valid, note)
+    return { success: !!plan, plan }
+  })
+  ipcMain.handle('plan:history', (_e, limit?: number) => getPlanHistory(limit || 7))
+  ipcMain.handle('plan:regenerateToday', async () => {
+    const result = await regenerateTodayPlan()
+    return { ...result, exam: getExamInfo(), phase: getExamPhase() }
+  })
+  ipcMain.handle('plan:forward', async () => {
+    const result = await generateForwardPlan()
+    return { ...result, exam: getExamInfo(), phase: getExamPhase() }
+  })
 }
 
 // ============ Exported Auto-Induct Logic ============
@@ -983,9 +1060,7 @@ export function registerIpcHandlers(): void {
 export async function runAutoInduct(dateStr?: string): Promise<{ inducted: boolean; date?: string; reason?: string }> {
   const db = getDb()
   if (!dateStr) {
-    const yesterday = new Date()
-    yesterday.setDate(yesterday.getDate() - 1)
-    dateStr = yesterday.toISOString().slice(0, 10)
+    dateStr = dayjs().subtract(1, 'day').format('YYYY-MM-DD')
   }
 
   // Check if date has confirmed questions

@@ -9,6 +9,7 @@ import path from 'path'
 import dayjs from 'dayjs'
 import { app } from 'electron'
 import sharp from 'sharp'
+import { resolveInside, safeMarkdownFileName, sanitizePathSegment } from './path-safety'
 
 // ─── Local base directory ───
 export function getLocalDataDir(): string {
@@ -143,9 +144,22 @@ export async function saveMarkdown(questionData: any): Promise<{ success: boolea
   // Write to SQLite（无论 pending/classified/confirmed 都记录）
   if (db) {
     db.prepare(`
-      INSERT OR REPLACE INTO questions (id, image_url, level1, level2, level3, confidence, ocr_text, reasoning,
+      INSERT INTO questions (id, image_url, level1, level2, level3, confidence, ocr_text, reasoning,
         status, error_count, source, obsidian_path, local_image_path, reflection, error_type, has_graphics, graphic_image_path, trace_id, file_hash, created_at, confirmed_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        image_url = excluded.image_url, level1 = excluded.level1, level2 = excluded.level2,
+        level3 = excluded.level3, confidence = excluded.confidence, ocr_text = excluded.ocr_text,
+        reasoning = excluded.reasoning, status = excluded.status, error_count = excluded.error_count,
+        source = excluded.source,
+        local_image_path = COALESCE(excluded.local_image_path, questions.local_image_path),
+        reflection = COALESCE(excluded.reflection, questions.reflection),
+        error_type = COALESCE(excluded.error_type, questions.error_type),
+        has_graphics = excluded.has_graphics,
+        graphic_image_path = COALESCE(excluded.graphic_image_path, questions.graphic_image_path),
+        trace_id = COALESCE(excluded.trace_id, questions.trace_id),
+        file_hash = COALESCE(excluded.file_hash, questions.file_hash),
+        confirmed_at = COALESCE(questions.confirmed_at, excluded.confirmed_at)
     `).run(
       questionData.id, questionData.imageUrl || '', questionData.level1 || '未分类',
       questionData.level2 || '', questionData.level3 || null, questionData.confidence || 0,
@@ -165,11 +179,12 @@ export async function saveMarkdown(questionData: any): Promise<{ success: boolea
 
   if (questionData.status === 'confirmed') {
     const { notesDir } = ensureDirs()
-    const level1 = questionData.level1 || '未分类'
-    const subDir = path.join(notesDir, level1)
+    const level1 = sanitizePathSegment(questionData.level1, '未分类')
+    const subDir = resolveInside(notesDir, level1)
     fs.ensureDirSync(subDir)
-    const fileName = uniqueFileName(subDir, questionData.fileName || `${dayjs().format('YYYYMMDD-HHmmss')}.md`)
-    localFilePath = path.join(subDir, fileName)
+    const requestedName = safeMarkdownFileName(questionData.fileName, `${dayjs().format('YYYYMMDD-HHmmss')}.md`)
+    const fileName = uniqueFileName(subDir, requestedName)
+    localFilePath = resolveInside(subDir, fileName)
     const markdown = buildMarkdown(questionData)
     fs.writeFileSync(localFilePath, markdown, 'utf-8')
     logger.info('storage', 'local_write_success', `本地写入: ${localFilePath}`, null, traceId)
@@ -180,11 +195,14 @@ export async function saveMarkdown(questionData: any): Promise<{ success: boolea
       vaultWrite = true
       logger.info('storage', 'vault_write_success', `Vault 写入: ${result.vaultPath}`, null, traceId)
       if (db && result.relativePath) {
-        db.prepare('UPDATE questions SET obsidian_path = ? WHERE id = ?').run(result.relativePath, questionData.id)
+        db.prepare("UPDATE questions SET obsidian_path = ?, sync_status = 'synced', sync_error = NULL, last_synced_at = ? WHERE id = ?")
+          .run(result.relativePath, new Date().toISOString(), questionData.id)
       }
     } else {
       // Vault 不可用 → 进入离线重试队列，恢复后自动补写（PRD 离线可用）
       enqueueVaultWrite({ ...questionData, id: questionData.id, traceId }, markdown)
+      db.prepare("UPDATE questions SET sync_status = 'pending', sync_error = ? WHERE id = ?")
+        .run('Vault 暂不可用，已进入重试队列', questionData.id)
     }
   }
 

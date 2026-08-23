@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import { app } from 'electron'
 import { join } from 'path'
 import fs from 'fs-extra'
+import { localDateKey } from './date-utils'
 
 let db: Database.Database
 
@@ -16,6 +17,7 @@ export function initDatabase(): void {
   db = new Database(dbPath)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
+  db.pragma('busy_timeout = 5000')
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS config (
@@ -72,11 +74,17 @@ export function initDatabase(): void {
     try { db.exec(`ALTER TABLE questions ADD COLUMN ai_raw_level2 TEXT`) } catch { /* already exists */ }
     try { db.exec(`ALTER TABLE questions ADD COLUMN ai_raw_level3 TEXT`) } catch { /* already exists */ }
     try { db.exec(`ALTER TABLE questions ADD COLUMN file_hash TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN sync_status TEXT DEFAULT 'pending'`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN sync_error TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN last_synced_at TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN deleted_at TEXT`) } catch { /* already exists */ }
     db.exec(`
     CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
     CREATE INDEX IF NOT EXISTS idx_questions_level1 ON questions(level1);
     CREATE INDEX IF NOT EXISTS idx_questions_level2 ON questions(level2);
     CREATE INDEX IF NOT EXISTS idx_questions_created ON questions(created_at);
+    CREATE INDEX IF NOT EXISTS idx_questions_file_hash ON questions(file_hash);
+    CREATE INDEX IF NOT EXISTS idx_questions_sync_status ON questions(sync_status);
 
     CREATE TABLE IF NOT EXISTS tag_tree (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,6 +114,39 @@ export function initDatabase(): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_review_card ON review_log(card_path, date);
+    CREATE TABLE IF NOT EXISTS review_state (
+      card_path TEXT PRIMARY KEY,
+      interval_days INTEGER NOT NULL DEFAULT 0,
+      repetitions INTEGER NOT NULL DEFAULT 0,
+      lapses INTEGER NOT NULL DEFAULT 0,
+      last_rating TEXT,
+      last_reviewed_at TEXT,
+      due_date TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_review_state_due ON review_state(due_date);
+
+    CREATE TABLE IF NOT EXISTS test_attempts (
+      id TEXT PRIMARY KEY,
+      question_ids TEXT NOT NULL,
+      wrong_ids TEXT NOT NULL,
+      total_count INTEGER NOT NULL,
+      wrong_count INTEGER NOT NULL,
+      accuracy REAL NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_test_attempts_created ON test_attempts(created_at);
+
+    -- 每日备考计划（含 AI 动态调整）
+    CREATE TABLE IF NOT EXISTS daily_plans (
+      date TEXT PRIMARY KEY,
+      tasks_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      note TEXT,
+      ai_adjusted INTEGER NOT NULL DEFAULT 0,
+      adjustment_reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `)
 
   // Insert default tag tree if table is empty
@@ -120,7 +161,7 @@ export function initDatabase(): void {
 function getDefaultTagTree() {
   return {
     version: '1.0',
-    updated: new Date().toISOString().slice(0, 10),
+    updated: localDateKey(),
     tree: [
       {
         id: 'verbal',

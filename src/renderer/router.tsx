@@ -14,6 +14,7 @@ const SettingsPage = lazy(() => import('./pages/settings').then(m => ({ default:
 const ManualEntryPage = lazy(() => import('./pages/manual-entry').then(m => ({ default: m.ManualEntryPage })))
 const KnowledgePage = lazy(() => import('./pages/knowledge').then(m => ({ default: m.KnowledgePage })))
 const TestBuilderPage = lazy(() => import('./pages/test-builder').then(m => ({ default: m.TestBuilderPage })))
+const PlanPage = lazy(() => import('./pages/plan').then(m => ({ default: m.PlanPage })))
 
 function lazyPage(node: ReactNode) {
   return (
@@ -32,6 +33,7 @@ export function AppRouter() {
     <Routes>
       <Route element={<AppLayout />}>
         <Route path="/" element={lazyPage(<HomePage />)} />
+        <Route path="/plan" element={lazyPage(<PlanPage />)} />
         <Route path="/pending" element={lazyPage(<PendingPage />)} />
         <Route path="/questions" element={lazyPage(<QuestionBankPage />)} />
         <Route path="/stats" element={lazyPage(<StatsPage />)} />

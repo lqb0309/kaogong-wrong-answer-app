@@ -81,10 +81,11 @@ export function KnowledgePage() {
   }, [])
 
   // 标记复习完成（加权队列闭环）
-  const handleMarkReview = useCallback(async (card: any, result: 'done' | 'wrong') => {
+  const handleMarkReview = useCallback(async (card: any, result: 'done' | 'wrong' | 'hard' | 'easy') => {
     const r = await window.api.markReview(card.file_path, result)
     if (r.success) {
-      message.success(result === 'done' ? '已标记复习完成' : '已标记「做错了」，该知识点权重提升')
+      const labels = { wrong: '忘记了，明天再次复习', hard: '较难，已缩短复习间隔', done: '记得，已安排下次复习', easy: '很熟，已延长复习间隔' }
+      message.success(`${labels[result]}${r.dueDate ? `（${r.dueDate}）` : ''}`)
       setReviewCards((prev) => prev.filter((c: any) => c.file_path !== card.file_path))
       setReviewedToday((prev) => [...prev, card.file_path])
     } else {
@@ -452,11 +453,11 @@ export function KnowledgePage() {
                     {card.error_count > 0 && <Tag color="red" style={{ fontSize: 11 }}>错 {card.error_count} 次</Tag>}
                   </div>
                   <div style={{ marginTop: 6, fontSize: 11, color: '#888' }}>{[card.level1, card.level2, card.level3].filter(Boolean).join(' > ')}</div>
-                  <div style={{ marginTop: 8, display: 'flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                    <Button size="small" type="primary" ghost icon={<CheckOutlined />}
-                      onClick={() => handleMarkReview(card, 'done')}>已复习</Button>
-                    <Button size="small" danger ghost
-                      onClick={() => handleMarkReview(card, 'wrong')}>做错了</Button>
+                  <div style={{ marginTop: 8, display: 'flex', gap: 4, flexWrap: 'wrap' }} onClick={(e) => e.stopPropagation()}>
+                    <Button size="small" danger ghost onClick={() => handleMarkReview(card, 'wrong')}>忘记</Button>
+                    <Button size="small" onClick={() => handleMarkReview(card, 'hard')}>困难</Button>
+                    <Button size="small" type="primary" ghost icon={<CheckOutlined />} onClick={() => handleMarkReview(card, 'done')}>记得</Button>
+                    <Button size="small" type="primary" onClick={() => handleMarkReview(card, 'easy')}>轻松</Button>
                     <Button size="small" type="link" icon={<EyeOutlined />} onClick={() => handleViewCard(card)}>详情</Button>
                   </div>
                 </Card>

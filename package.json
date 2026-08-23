@@ -8,6 +8,8 @@
     "postinstall": "electron-rebuild",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "check": "npm run typecheck && npm run build",
     "preview": "electron-vite preview",
     "pack": "electron-builder --dir",
     "dist": "electron-vite build && electron-builder",

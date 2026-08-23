@@ -154,15 +154,12 @@ export function TestBuilderPage() {
 
   const handleSubmitAnswers = useCallback(async () => {
     const wrongIds = Array.from(wrongSet)
-    if (wrongIds.length === 0) {
-      message.success('全部做对了，太棒了！')
-      setAnswerOpen(false)
-      return
-    }
     try {
-      const res = await window.api.markTestAnswers(wrongIds)
+      const res = await window.api.markTestAnswers(wrongIds, selectedOrder)
       if (res.success) {
-        message.success(`已回填 ${res.updated} 道错题（错误计数 +1），同步 ${res.cardBumps} 张知识卡片`)
+        message.success(wrongIds.length === 0
+          ? '本次全部做对，已记录答题结果'
+          : `正确率 ${Math.round((res.accuracy || 0) * 100)}%，已回填 ${res.updated} 道错题并同步 ${res.cardBumps} 张知识卡片`)
       } else {
         message.error(res.error || '回填失败')
       }
@@ -170,7 +167,7 @@ export function TestBuilderPage() {
       message.error(`回填失败: ${err.message}`)
     }
     setAnswerOpen(false)
-  }, [wrongSet, message])
+  }, [wrongSet, selectedOrder, message])
 
   // ── 有序选中操作 ──
   const isSelected = (id: string) => selectedOrder.includes(id)

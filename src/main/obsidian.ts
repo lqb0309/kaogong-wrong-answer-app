@@ -4,6 +4,7 @@ import { getDb } from './db'
 import dayjs from 'dayjs'
 import fs from 'fs-extra'
 import path from 'path'
+import { resolveInside, safeMarkdownFileName, sanitizePathSegment } from './path-safety'
 
 // ─── Direct vault file writer (no plugin needed) ───
 export function writeToVault(questionData: any): { success: boolean; vaultPath?: string; relativePath?: string } {
@@ -12,17 +13,15 @@ export function writeToVault(questionData: any): { success: boolean; vaultPath?:
 
   const date = dayjs().format('YYYYMMDD')
   const time = dayjs().format('HHmmss')
-  const level1 = questionData.level1 || '其他'
-  const level2 = questionData.level2 || ''
-  const level3 = questionData.level3 || ''
+  const level1 = sanitizePathSegment(questionData.level1, '其他')
+  const level2 = questionData.level2 ? sanitizePathSegment(questionData.level2, '') : ''
+  const level3 = questionData.level3 ? sanitizePathSegment(questionData.level3, '') : ''
   // Always use full category path
   const subdir = level3 ? `${level1}/${level2}/${level3}` : level2 ? `${level1}/${level2}` : level1
 
-  let fileName = questionData.fileName || `${date}-${time}.md`
-  // Ensure .md extension
-  if (!fileName.endsWith('.md')) fileName = fileName.replace(/\.[^.]+$/, '') + '.md'
+  const fileName = safeMarkdownFileName(questionData.fileName, `${date}-${time}.md`)
   const relativePath = subdir ? `${subdir}/${fileName}` : fileName
-  const fullPath = path.join(vaultRoot, relativePath)
+  const fullPath = resolveInside(vaultRoot, relativePath)
   const markdown = questionData.markdown || ''
   const traceId = questionData.traceId || null
 
@@ -30,7 +29,7 @@ export function writeToVault(questionData: any): { success: boolean; vaultPath?:
     const dirPath = path.dirname(fullPath)
     // Handle case where a file exists at the directory path (e.g. from old writes)
     if (fs.existsSync(dirPath) && !fs.statSync(dirPath).isDirectory()) {
-      fs.removeSync(dirPath)
+      throw new Error(`目标目录被同名文件占用: ${dirPath}`)
     }
     fs.ensureDirSync(dirPath)
     fs.writeFileSync(fullPath, markdown, 'utf-8')

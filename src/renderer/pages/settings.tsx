@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Card, Form, Input, Select, Slider, InputNumber, Switch, Button, Divider, App, Alert, Collapse, Space, Tooltip } from 'antd'
 import { useSettingsStore } from '@/stores/settings'
-import { ReloadOutlined } from '@ant-design/icons'
+import { ReloadOutlined, SafetyCertificateOutlined, FolderOpenOutlined } from '@ant-design/icons'
 
 // 模型名可能很长，选中后显示省略，hover 显示全名
 const modelLabelRender = (props: any) => (
@@ -36,8 +36,26 @@ export function SettingsPage() {
   const [reasonOpts, setReasonOpts] = useState<{ value: string }[]>([])
   const [visionFetching, setVisionFetching] = useState(false)
   const [reasonFetching, setReasonFetching] = useState(false)
+  const [backups, setBackups] = useState<Array<{ name: string; path: string; createdAt: string; size: number }>>([])
+  const [backupCreating, setBackupCreating] = useState(false)
 
   useEffect(() => { if (!loaded) load() }, [loaded, load])
+  useEffect(() => { window.api.listBackups().then(setBackups).catch(() => setBackups([])) }, [])
+
+  const handleCreateBackup = useCallback(async () => {
+    setBackupCreating(true)
+    try {
+      const result = await window.api.createBackup()
+      if (result.success) {
+        message.success(`备份已创建：${result.backup.name}`)
+        setBackups(await window.api.listBackups())
+      }
+    } catch (err: any) {
+      message.error(`备份失败：${err.message}`)
+    } finally {
+      setBackupCreating(false)
+    }
+  }, [message])
 
   useEffect(() => {
     if (!loaded || !Object.keys(config).length) return
@@ -161,6 +179,13 @@ export function SettingsPage() {
             <Form.Item label="本地数据目录" name="local_data_dir" tooltip="错题 Markdown 和图片的本地存储位置">
               <Input placeholder="~/考公错题（默认）" />
             </Form.Item>
+            <Divider orientation="left" plain>数据保护</Divider>
+            <Alert message="应用每次启动都会创建数据库快照，自动保留最近 14 份。" type="success" showIcon style={{ marginBottom: 12 }} />
+            <Space wrap>
+              <Button icon={<SafetyCertificateOutlined />} loading={backupCreating} onClick={handleCreateBackup}>立即备份</Button>
+              {backups[0] && <Button icon={<FolderOpenOutlined />} onClick={() => window.api.openExternal(backups[0].path)}>打开最近备份</Button>}
+            </Space>
+            {backups[0] && <div style={{ marginTop: 8, fontSize: 12, color: '#888' }}>最近：{backups[0].name} · {(backups[0].size / 1024 / 1024).toFixed(1)} MB · 共 {backups.length} 份</div>}
           </Panel>
 
           {/* ===== 图床 ===== */}

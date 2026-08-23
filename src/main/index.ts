@@ -5,6 +5,9 @@ import { logger } from './logger'
 import { readConfig } from './config'
 import { flushVaultQueue } from './retry-queue'
 import { registerIpcHandlers, runAutoInductForRecentDays } from './ipc-handlers'
+import { ensureTodayPlan } from './daily-plan'
+import { localDateKey } from './date-utils'
+import { createDatabaseBackup } from './backup'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -55,11 +58,14 @@ function createWindow(): void {
 app.whenReady().then(() => {
   initDatabase()
   // Record login day
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDateKey()
   getDb().prepare('INSERT OR IGNORE INTO login_days (date) VALUES (?)').run(today)
   logger.info('system', 'app_start', '小乖的考公错题屋启动', { version: app.getVersion() })
   registerIpcHandlers()
   createWindow()
+
+  // Keep a small rolling set of recoverable snapshots. Failure must never block startup.
+  createDatabaseBackup('startup').catch(err => logger.warn('storage', 'backup_failed', err?.message || String(err)))
 
   // 启动时按配置清理过期日志（PRD：日志保留天数）
   try {
@@ -87,6 +93,11 @@ app.whenReady().then(() => {
       }
     }
   }, 3000)
+
+  // 预生成今日计划：昨天未完成时调用 AI 调整，让用户一打开页面就有现成的计划
+  setTimeout(() => {
+    ensureTodayPlan().catch(err => logger.error('daily_plan', 'startup_generate_failed', err?.message || String(err)))
+  }, 500)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

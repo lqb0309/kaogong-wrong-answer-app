@@ -3,6 +3,7 @@ import { join } from 'path'
 import { readConfig } from './config'
 import { logger } from './logger'
 import { getDb } from './db'
+import { localDateKey } from './date-utils'
 
 // ============ Types ============
 
@@ -315,7 +316,7 @@ export function writeKnowledgeCard(card: NewCardInput): { success: boolean; full
 
     fs.ensureDirSync(dir)
 
-    const now = new Date().toISOString().slice(0, 10)
+    const now = localDateKey()
     const parts = card.file_path.replace(/\.md$/, '').split('/')
     const category = parts.filter(p => p !== '笔记本').join('/')
 
@@ -369,7 +370,7 @@ export function updateKnowledgeCard(input: UpdateCardInput): { success: boolean;
   try {
     let content = fs.readFileSync(fullPath, 'utf-8')
     const fm = parseFrontmatter(content)
-    const now = new Date().toISOString().slice(0, 10)
+    const now = localDateKey()
 
     // Update frontmatter fields
     if (input.increment_error_count > 0) {
@@ -482,7 +483,7 @@ export function updateMoc(update: MocUpdateInput): { success: boolean; error?: s
     if (update.action === 'update_stats') {
       if (!fs.existsSync(fullPath)) return { success: false, error: `MOC 文件不存在: ${update.moc_file}` }
       let content = fs.readFileSync(fullPath, 'utf-8')
-      const now = new Date().toISOString().slice(0, 10)
+      const now = localDateKey()
       content = content.replace(/^updated:\s*.+/m, `updated: ${now}`)
       content = content.replace(/\*最近更新:.+/g, `*最近更新: ${now} | AI 自动维护*`)
       fs.writeFileSync(fullPath, content, 'utf-8')
@@ -497,7 +498,7 @@ export function updateMoc(update: MocUpdateInput): { success: boolean; error?: s
         const mocMarkdown = `---
 type: moc
 category: ${category}
-updated: ${new Date().toISOString().slice(0, 10)}
+updated: ${localDateKey()}
 ---
 
 # ${parts[parts.length - 1]?.replace('_', '').replace('-总览', '') || '索引'} · 知识笔记
@@ -514,7 +515,7 @@ updated: ${new Date().toISOString().slice(0, 10)}
 
 ---
 
-*最近更新: ${new Date().toISOString().slice(0, 10)} | 共 0 张知识卡片*
+*最近更新: ${localDateKey()} | 共 0 张知识卡片*
 `
         fs.ensureDirSync(join(fullPath, '..'))
         fs.writeFileSync(fullPath, mocMarkdown, 'utf-8')
@@ -536,7 +537,7 @@ updated: ${new Date().toISOString().slice(0, 10)}
       }
 
       // Update stats
-      const now = new Date().toISOString().slice(0, 10)
+      const now = localDateKey()
       content = content.replace(/^updated:\s*.+/m, `updated: ${now}`)
       const cardCount = (content.match(/^-\s*\[\[/gm) || []).length
       content = content.replace(/\*最近更新:.+/g, `*最近更新: ${now} | 共 ${cardCount} 张知识卡片*`)
@@ -625,7 +626,7 @@ export function bumpCardError(cardPath: string): { success: boolean; error?: str
   try {
     let content = fs.readFileSync(fullPath, 'utf-8')
     const fm = parseFrontmatter(content)
-    const now = new Date().toISOString().slice(0, 10)
+    const now = localDateKey()
     const current = fm.error_count || 0
     content = content.replace(/^error_count:\s*\d+/m, `error_count: ${current + 1}`)
     content = content.replace(/^last_seen:\s*.+/m, `last_seen: ${now}`)
@@ -687,16 +688,23 @@ export function getReviewQueueCards(count?: number): { cards: ExistingCard[]; re
   const allCards = scanExistingCards()
   if (allCards.length === 0) return { cards: [], reviewedToday: [] }
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDateKey()
   const db = getDb()
   const reviewedToday = (db.prepare('SELECT DISTINCT card_path FROM review_log WHERE date = ?').all(today) as { card_path: string }[]).map(r => r.card_path)
   const reviewedSet = new Set(reviewedToday)
+  const states = db.prepare('SELECT card_path, due_date, interval_days, lapses FROM review_state').all() as Array<{ card_path: string; due_date: string; interval_days: number; lapses: number }>
+  const stateMap = new Map(states.map(state => [state.card_path, state]))
   const dailyCount = Math.max(1, count || Number(readConfig('review_daily_count') || 5))
 
   const cards = allCards
-    .filter(c => !reviewedSet.has(c.file_path))
+    .filter(c => !reviewedSet.has(c.file_path) && (!stateMap.get(c.file_path) || stateMap.get(c.file_path)!.due_date <= today))
     .map(card => {
       let score = (card.error_count || 0) * 3
+      const state = stateMap.get(card.file_path)
+      if (state) {
+        score += state.lapses * 2
+        score += Math.max(0, Math.floor((Date.now() - new Date(`${state.due_date}T00:00:00`).getTime()) / 86400000))
+      }
       if (card.last_seen) {
         const days = Math.max(0, Math.floor((Date.now() - new Date(card.last_seen + 'T00:00:00').getTime()) / 86400000))
         score += Math.min(days, 30)

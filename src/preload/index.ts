@@ -5,6 +5,8 @@ const api = {
   getConfig: (key: string) => ipcRenderer.invoke('config:get', key),
   getAllConfig: () => ipcRenderer.invoke('config:getAll'),
   setConfig: (key: string, value: string) => ipcRenderer.invoke('config:set', key, value),
+  createBackup: () => ipcRenderer.invoke('backup:create'),
+  listBackups: () => ipcRenderer.invoke('backup:list'),
 
   // File
   readFile: (filePath: string) => ipcRenderer.invoke('file:read', filePath),
@@ -73,7 +75,16 @@ const api = {
   selectTestQuestions: (params?: any) => ipcRenderer.invoke('test:selectQuestions', params || {}),
   generateTestPdf: (questionIds: string[], options?: any) => ipcRenderer.invoke('test:generatePdf', questionIds, options || {}),
   selectFromReviewQueue: (count?: number) => ipcRenderer.invoke('test:selectFromReviewQueue', count),
-  markTestAnswers: (wrongIds: string[]) => ipcRenderer.invoke('test:markAnswers', wrongIds),
+  markTestAnswers: (wrongIds: string[], questionIds?: string[]) => ipcRenderer.invoke('test:markAnswers', wrongIds, questionIds),
+  getTestAttempts: (limit?: number) => ipcRenderer.invoke('test:attempts', limit),
+
+  // Daily Plan (每日备考计划 + AI 动态调整 + 倒排)
+  getTodayPlan: () => ipcRenderer.invoke('plan:getToday'),
+  updatePlanTask: (date: string, taskId: string, done: boolean) => ipcRenderer.invoke('plan:updateTask', date, taskId, done),
+  submitPlanFeedback: (date: string, status: string, note: string) => ipcRenderer.invoke('plan:submitFeedback', date, status, note),
+  getPlanHistory: (limit?: number) => ipcRenderer.invoke('plan:history', limit || 7),
+  regenerateTodayPlan: () => ipcRenderer.invoke('plan:regenerateToday'),
+  planForward: () => ipcRenderer.invoke('plan:forward'),
 
   // Events from main
   onLogError: (callback: (data: any) => void) => {

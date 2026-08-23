@@ -13,7 +13,8 @@ import {
   FireOutlined,
   BookOutlined,
   FilePdfOutlined,
-  WifiOutlined
+  WifiOutlined,
+  ScheduleOutlined
 } from '@ant-design/icons'
 import logoPng from '@/assets/logo.png'
 
@@ -29,6 +30,14 @@ export function AppLayout() {
   const [online, setOnline] = useState(navigator.onLine)
 
   const selectedKey = '/' + location.pathname.split('/')[1]
+
+  // 打开应用默认进入"每日计划"页：一打开就知道今天要干什么
+  useEffect(() => {
+    if (location.pathname === '/') {
+      navigate('/plan', { replace: true })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     window.api.getStreak().then(r => setStreak(r.streak))
@@ -67,6 +76,7 @@ export function AppLayout() {
       type: 'group' as const,
       label: '核心流程',
       children: [
+        { key: '/plan', icon: <ScheduleOutlined />, label: '每日计划' },
         { key: '/', icon: <HomeOutlined />, label: '成品库' },
         pendingItem,
         { key: '/questions', icon: <DatabaseOutlined />, label: '错题库' },

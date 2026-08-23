@@ -1,6 +1,8 @@
 /// <reference types="vite/client" />
 
 interface ElectronApi {  getConfig: (key: string) => Promise<string | undefined>
+  createBackup: () => Promise<{ success: boolean; backup: { name: string; path: string; createdAt: string; size: number } }>
+  listBackups: () => Promise<Array<{ name: string; path: string; createdAt: string; size: number }>>
   getAllConfig: () => Promise<Record<string, string>>
   setConfig: (key: string, value: string) => Promise<void>
   readFile: (filePath: string) => Promise<string>
@@ -17,7 +19,7 @@ interface ElectronApi {  getConfig: (key: string) => Promise<string | undefined>
   testConnection: (baseURL: string, apiKey: string, model: string) => Promise<{ success: boolean; latency?: number; modelUsed?: string; preview?: string; error?: string }>
   writeToObsidian: (questionData: any) => Promise<any>
   checkObsidianOnline: () => Promise<boolean>
-  syncVault: () => Promise<{ deleted: number; message: string }>
+  syncVault: () => Promise<{ deleted: number; missing?: number; message: string }>
   reorganizeVault: () => Promise<{ moved: number; skipped: number }>
   getStreak: () => Promise<{ streak: number; total: number }>
   getAppOverview: () => Promise<{ pendingCount: number; classifiedCount: number; confirmedCount: number; todayCount: number; streak: number; retryQueueSize: number }>
@@ -111,12 +113,13 @@ interface ElectronApi {  getConfig: (key: string) => Promise<string | undefined>
   getDailyNotes: () => Promise<{ success: boolean; error?: string; notes: Array<{ date: string; file_path: string; title: string; total_questions: number; preview: string }> }>
   getDailyNoteContent: (date: string) => Promise<{ success: boolean; content?: string; error?: string }>
   getReviewQueue: (count?: number) => Promise<{ success: boolean; error?: string; cards: Array<{ title: string; file_path: string; knowledge_type: string; level1: string; level2: string; level3: string | null; error_count: number; last_seen: string; score: number }>; reviewedToday: string[] }>
-  markReview: (cardPath: string, result: string) => Promise<{ success: boolean; error?: string; cardBumped?: boolean }>
+  markReview: (cardPath: string, result: 'done' | 'wrong' | 'hard' | 'easy') => Promise<{ success: boolean; error?: string; cardBumped?: boolean; intervalDays?: number; dueDate?: string }>
   getCardQuestions: (cardPath: string) => Promise<{ success: boolean; error?: string; questions: any[] }>
   selectTestQuestions: (params?: { ids?: string[]; level1?: string; level2?: string; level3?: string; search?: string; limit?: number; random?: boolean }) => Promise<{ success: boolean; error?: string; questions: any[] }>
   generateTestPdf: (questionIds: string[], options?: { title?: string; showAnswers?: boolean; questionsPerPage?: number; pageSize?: string; includeAnswerSheet?: boolean; imageMode?: 'graphics_only' | 'full' }) => Promise<{ success: boolean; filePath?: string; error?: string; imageErrors: string[] }>
   selectFromReviewQueue: (count?: number) => Promise<{ success: boolean; error?: string; ids: string[]; cards: any[] }>
-  markTestAnswers: (wrongIds: string[]) => Promise<{ success: boolean; error?: string; updated?: number; cardBumps?: number }>
+  markTestAnswers: (wrongIds: string[], questionIds?: string[]) => Promise<{ success: boolean; error?: string; updated?: number; cardBumps?: number; totalCount?: number; accuracy?: number }>
+  getTestAttempts: (limit?: number) => Promise<Array<{ id: string; question_ids: string; wrong_ids: string; total_count: number; wrong_count: number; accuracy: number; created_at: string }>>
   openExternal: (path: string) => Promise<void>
   getAppVersion: () => Promise<string>
   reportRendererError: (errorText: string) => Promise<void>
@@ -125,6 +128,70 @@ interface ElectronApi {  getConfig: (key: string) => Promise<string | undefined>
   selectFiles: () => Promise<string[]>
   selectFile: () => Promise<string | null>
   saveFile: (defaultName: string, content: string) => Promise<string | null>
+
+  // Daily Plan (每日备考计划 + AI 动态调整 + 倒排)
+  getTodayPlan: () => Promise<{
+    success: boolean
+    error?: string
+    plan: {
+      date: string
+      tasks: Array<{ id: string; title: string; detail: string; minutes: number; module: string; done: 0 | 1 }>
+      status: 'pending' | 'partial' | 'completed'
+      note: string
+      ai_adjusted: boolean
+      adjustment_reason: string
+      created_at: string
+      updated_at: string
+    } | null
+    exam: { exam_date: string; days_until: number }
+    phase: {
+      name: '基础阶段' | '强化阶段' | '冲刺阶段' | '已到考前'
+      days_left: number
+      phase_start: string
+      phase_end: string
+      phase_days_left: number
+      focus: string
+      milestones: Array<{ date: string; label: string; type: 'phase' | 'exam' | 'info' }>
+    }
+    future_note: string
+    forward_plan: {
+      overview: string
+      days: Array<{ date: string; title: string; detail: string }>
+      generated_at: string
+    } | null
+    recent: Array<{
+      date: string
+      status: 'pending' | 'partial' | 'completed'
+      note: string
+      ai_adjusted: boolean
+      adjustment_reason: string
+      tasks_total: number
+      tasks_done: number
+    }>
+  }>
+  updatePlanTask: (date: string, taskId: string, done: boolean) => Promise<{ success: boolean; plan: any }>
+  submitPlanFeedback: (date: string, status: string, note: string) => Promise<{ success: boolean; plan: any }>
+  getPlanHistory: (limit?: number) => Promise<Array<{
+    date: string
+    status: 'pending' | 'partial' | 'completed'
+    note: string
+    ai_adjusted: boolean
+    adjustment_reason: string
+    tasks_total: number
+    tasks_done: number
+  }>>
+  regenerateTodayPlan: () => Promise<{ success: boolean; plan: any; error?: string; exam?: { exam_date: string; days_until: number }; phase?: any }>
+  planForward: () => Promise<{
+    success: boolean
+    error?: string
+    plan?: {
+      overview: string
+      days: Array<{ date: string; title: string; detail: string }>
+      generated_at: string
+    }
+    exam?: { exam_date: string; days_until: number }
+    phase?: any
+  }>
 }
 
 declare global {

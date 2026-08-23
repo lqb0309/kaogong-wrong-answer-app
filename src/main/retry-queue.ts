@@ -70,12 +70,19 @@ export function flushVaultQueue(): { flushed: number; failed: number } {
       logger.info('retry', 'flush_success', `重试写入成功: ${result.vaultPath}`, null, item.questionData.traceId)
       if (db && result.relativePath) {
         try {
-          db.prepare('UPDATE questions SET obsidian_path = ? WHERE id = ?').run(result.relativePath, item.questionData.id)
+          db.prepare("UPDATE questions SET obsidian_path = ?, sync_status = 'synced', sync_error = NULL, last_synced_at = ? WHERE id = ?")
+            .run(result.relativePath, new Date().toISOString(), item.questionData.id)
         } catch { /* ignore */ }
       }
     } else {
       item.attempts += 1
       if (item.attempts < MAX_ATTEMPTS) remaining.push(item)
+      else {
+        try {
+          db.prepare("UPDATE questions SET sync_status = 'failed', sync_error = ? WHERE id = ?")
+            .run(`Vault 写入连续失败 ${item.attempts} 次`, item.questionData.id)
+        } catch { /* database may be closing */ }
+      }
       failed++
       logger.warn('retry', 'flush_failed', `重试写入仍失败（第 ${item.attempts} 次）`, {
         traceId: item.questionData.traceId

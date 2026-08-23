@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Typography, Table, Input, Select, Space, Button, Tag, App, Popconfirm, Image, Modal, Descriptions, Form, InputNumber, Empty, Segmented } from 'antd'
-import { SearchOutlined, DeleteOutlined, ReloadOutlined, FileTextOutlined, SyncOutlined, FolderOpenOutlined, EditOutlined, ExportOutlined } from '@ant-design/icons'
+import { Typography, Table, Input, Select, Space, Button, Tag, App, Popconfirm, Image, Modal, Descriptions, Form, InputNumber, Empty, Segmented, Card, Row, Col } from 'antd'
+import { SearchOutlined, DeleteOutlined, ReloadOutlined, FileTextOutlined, SyncOutlined, FolderOpenOutlined, EditOutlined, ExportOutlined, BookOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useTagTreeStore } from '@/stores/tag-tree'
 import { MarkdownRenderer } from '@/components/markdown-renderer'
@@ -387,28 +387,53 @@ export function QuestionBankPage() {
         </Form>
       </Modal>
 
-      <Modal title="错题详情" open={!!detailItem} onCancel={() => setDetailItem(null)} width={640}
+      <Modal title="错题详情" open={!!detailItem} onCancel={() => setDetailItem(null)} width={1100}
         footer={<Space><Button onClick={() => setDetailItem(null)}>关闭</Button>
           <Button type="primary" ghost onClick={() => {
             if (detailItem) { handleEditOpen(detailItem); setDetailItem(null) }
           }}>编辑</Button>
           <Button type="primary" onClick={() => { if (detailItem) handleOpenObsidian(detailItem.obsidian_path); setDetailItem(null) }}>在 Obsidian 中打开</Button></Space>}>
         {detailItem && (
-          <div>
-            <Image src={detailItem.image_url} style={{ maxWidth: '100%', maxHeight: 300, objectFit: 'contain', marginBottom: 16, borderRadius: 8 }} />
-            <Descriptions column={2} size="small" bordered>
-              <Descriptions.Item label="一级">{detailItem.level1}</Descriptions.Item>
-              <Descriptions.Item label="二级">{detailItem.level2}</Descriptions.Item>
-              <Descriptions.Item label="三级">{detailItem.level3 || '-'}</Descriptions.Item>
-              <Descriptions.Item label="置信度">{Math.round(detailItem.confidence * 100)}%</Descriptions.Item>
-              <Descriptions.Item label="错误次数">{detailItem.error_count}</Descriptions.Item>
-              <Descriptions.Item label="错误类型">{detailItem.error_type || '-'}</Descriptions.Item>
-              <Descriptions.Item label="入库时间">{detailItem.created_at?.slice(0, 10)}</Descriptions.Item>
-              <Descriptions.Item label="来源" span={2}>{detailItem.source || '-'}</Descriptions.Item>
-              {detailItem.ocr_text && <Descriptions.Item label="OCR 原文" span={2}><div style={{ fontSize: 12, lineHeight: 1.6, color: '#666' }}><MarkdownRenderer content={detailItem.ocr_text} /></div></Descriptions.Item>}
-              {detailItem.reflection && <Descriptions.Item label="复盘反思" span={2}><div style={{ fontSize: 12, lineHeight: 1.6, color: '#fa8c16' }}><MarkdownRenderer content={detailItem.reflection} /></div></Descriptions.Item>}
-            </Descriptions>
-          </div>
+          <Row gutter={16} style={{ marginTop: 8 }}>
+            {/* 左：错题及详细内容 */}
+            <Col span={12}>
+              <Card size="small" title="题目" style={{ height: '100%' }}>
+                <Image src={detailItem.image_url} style={{ width: '100%', maxHeight: 320, objectFit: 'contain', borderRadius: 8, marginBottom: 12 }} />
+                <Descriptions column={1} size="small" bordered>
+                  <Descriptions.Item label="分类">{detailItem.level1}{detailItem.level2 ? ` › ${detailItem.level2}` : ''}{detailItem.level3 ? ` › ${detailItem.level3}` : ''}</Descriptions.Item>
+                  <Descriptions.Item label="置信度">{Math.round(detailItem.confidence * 100)}%</Descriptions.Item>
+                  <Descriptions.Item label="错误次数">{detailItem.error_count} 次</Descriptions.Item>
+                  <Descriptions.Item label="错误类型">{detailItem.error_type || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="入库时间">{detailItem.created_at?.slice(0, 10)}</Descriptions.Item>
+                  <Descriptions.Item label="来源">{detailItem.source || '-'}</Descriptions.Item>
+                </Descriptions>
+                {detailItem.ocr_text && (
+                  <div style={{ marginTop: 12 }}>
+                    <Typography.Text strong style={{ fontSize: 13 }}>OCR 原文</Typography.Text>
+                    <div style={{ marginTop: 4, fontSize: 12, lineHeight: 1.6, color: '#666', maxHeight: 220, overflow: 'auto' }}>
+                      <MarkdownRenderer content={detailItem.ocr_text} />
+                    </div>
+                  </div>
+                )}
+              </Card>
+            </Col>
+            {/* 右：复盘思路（滚动查看，左题固定不动） */}
+            <Col span={12}>
+              <Card
+                size="small"
+                title={<span><BookOutlined style={{ color: '#fa8c16' }} /> 复盘思路</span>}
+                style={{ height: '100%' }}
+              >
+                {detailItem.reflection ? (
+                  <div style={{ maxHeight: 620, overflow: 'auto', fontSize: 14, lineHeight: 1.8, paddingRight: 8 }}>
+                    <MarkdownRenderer content={detailItem.reflection} />
+                  </div>
+                ) : (
+                  <Typography.Text type="secondary">暂无复盘内容，可在「编辑」中补充或由 AI 生成。</Typography.Text>
+                )}
+              </Card>
+            </Col>
+          </Row>
         )}
       </Modal>
 
