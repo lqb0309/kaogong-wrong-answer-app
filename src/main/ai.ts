@@ -213,6 +213,23 @@ ${imageDescription ? `【题目分析】\n${imageDescription}\n` : ''}
       }, tid)
     }
 
+    // Classification and reflection form one pipeline. Reflection failure is non-fatal:
+    // the user can still confirm the classification and regenerate it later.
+    if (!classifyResult.reflection) {
+      try {
+        classifyResult.reflection = await generateReflection({
+          level1: classifyResult.level1,
+          level2: classifyResult.level2,
+          level3: classifyResult.level3,
+          ocrText: classifyResult.ocr_text || ocrText || imageDescription,
+          traceId: tid
+        }, onProgress)
+      } catch (reflectionError: any) {
+        logger.warn('ai', 'reflection_pipeline_failed', `分类成功，但自动复盘生成失败: ${reflectionError.message}`, null, tid)
+        classifyResult.reflection = ''
+      }
+    }
+
     return classifyResult
   } catch (err: any) {
     const duration = Date.now() - startTime
@@ -433,7 +450,9 @@ ${topSummary}
 请用中文回复，200-400 字即可。`
 }
 
-export async function generateReflection(params: { level1: string; level2?: string; level3?: string | null; ocrText: string; traceId?: string }, onProgress?: ProgressCallback): Promise<string> {
+type ReflectionParams = { level1: string; level2?: string; level3?: string | null; ocrText: string; errorType?: string; traceId?: string }
+
+export async function generateReflection(params: ReflectionParams, onProgress?: ProgressCallback): Promise<string> {
   const reasonKey = readConfig('ai_api_key')
   const reasonURL = readConfig('ai_base_url') || 'https://api.deepseek.com'
   const reasonModel = readConfig('ai_model') || 'deepseek-chat'
@@ -448,29 +467,38 @@ export async function generateReflection(params: { level1: string; level2?: stri
   const model = reasonKey ? reasonModel : (readConfig('vision_model') || 'qwen-vl-max')
 
   const levelPath = [params.level1, params.level2, params.level3].filter(Boolean).join(' > ')
-  const prompt = `你是一位公务员考试辅导专家。请为下面这道错题写出详细的复盘思路。
+  const context = `【题目分类】${levelPath || '未分类'}
+【用户错误类型】${params.errorType || '未提供，请只标注为“可能原因”，不要武断判断'}
+【题目 OCR】
+${params.ocrText || '未提供。不得虚构题干、选项、答案或数字，只能给出该题型的通用复盘框架。'}`
+  const customPrompt = readConfig('reflection_prompt')?.trim()
+  const defaultPrompt = `请生成一份适合个人错题复习的精炼复盘，目标是让用户下次遇到同类题时能识别、解出并避开原错误。
 
-【题目分类】${levelPath}
-【OCR文本】
-${params.ocrText || '（无OCR文本，请根据题目类型给出通用解法）'}
+严格按以下 Markdown 结构输出：
 
-请从以下两个方面给出解题思路，用 Markdown 格式输出：
+## 考点与识别信号
+- 一句话说明核心考点。
+- 列出 2～3 个看到题目时应立即识别的关键词或结构信号。
 
-## 正常解题思路
-写出这道题的常规完整解法。包括：
-- 题目分析：这道题在考什么？
-- 解题步骤：分步骤详细推导
-- 关键知识点：涉及哪些公式、定理、技巧
-- 易错点提示：常见错误和避坑方法
+## 标准解题路径
+- 用 3～6 个步骤写出可靠解法，只保留必要推导。
+- 如 OCR 没有足够条件得到唯一答案，明确指出缺失信息，不得补造答案。
 
-## 应试快速思路
-写出在考试时间紧张时的快速解法。包括：
-- 快速定位：如何从题干/选项中快速锁定关键信息
-- 排除技巧：如何用排除法缩小范围
-- 秒杀口诀/公式：可直接套用的快速方法
-- 蒙题策略：实在不会时的合理猜测思路
+## 考场最短路径
+- 给出可靠的快速定位、排除或简算方法。
+- 如果不存在稳定捷径，明确写“建议按标准步骤作答”，不要编造秒杀口诀。
 
-直接输出 Markdown，不要输出其他无关内容。`
+## 易错复盘
+- 已提供用户错误类型时，围绕真实错误类型分析。
+- 未提供时，只能列出 1～2 个“可能原因”，不得断言用户为何做错。
+
+## 下次行动规则
+用一条加粗句子给出可执行规则，格式为：**下次看到……，先……，再……。**
+
+全文控制在 400～800 个中文字符。不要重复题干，不写空泛鼓励，不提供无依据的蒙题结论。`
+  const prompt = `${customPrompt || defaultPrompt}
+
+${context}`
 
   const tid = params.traceId || generateTraceId()
 
@@ -481,8 +509,11 @@ ${params.ocrText || '（无OCR文本，请根据题目类型给出通用解法�
     try {
       const resp = await client.chat.completions.create({
         model,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 8192
+        messages: [
+          { role: 'system', content: '你是一位严谨的公务员考试错题复盘教练。只依据已提供信息作答，明确区分事实与推测，禁止虚构题目条件、答案和技巧。' },
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 3000
       })
       recordAiUsage(resp, 'reflection', reasonKey ? 'reason' : 'vision', model)
 

@@ -358,7 +358,7 @@ export function registerIpcHandlers(): void {
       return { success: true, suggestion }
     } catch (err: any) { return { success: false, error: err.message } }
   })
-  ipcMain.handle('ai:reflect', async (e, params: { level1: string; level2?: string; level3?: string | null; ocrText: string; traceId?: string }) => {
+  ipcMain.handle('ai:reflect', async (e, params: { level1: string; level2?: string; level3?: string | null; ocrText: string; errorType?: string; traceId?: string }) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     const onProgress = (stage: string, message: string) => {
       if (win && !win.isDestroyed()) win.webContents.send('ai:progress', { traceId: params.traceId || 'reflect', stage, message, ts: Date.now() })
@@ -532,7 +532,7 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('questions:pendingCount', () => {
-    const row = getDb().prepare("SELECT COUNT(*) as cnt FROM questions WHERE status IN ('pending', 'classified')").get() as { cnt: number }
+    const row = getDb().prepare("SELECT COUNT(*) as cnt FROM questions WHERE status = 'classified'").get() as { cnt: number }
     return row.cnt
   })
   ipcMain.handle('questions:createManual', async (_e, data: any) => {

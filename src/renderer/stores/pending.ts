@@ -39,9 +39,13 @@ interface PendingState {
 export const usePendingStore = create<PendingState>((set) => ({
   queue: [],
   currentIndex: 0,
-  setQueue: (items) => set({ queue: items, currentIndex: 0 }),
+  setQueue: (items) => set({ queue: [...new Map(items.map((item) => [item.id, item])).values()], currentIndex: 0 }),
   addItems: (items) =>
-    set((s) => ({ queue: [...s.queue, ...items] })),
+    set((s) => {
+      const merged = new Map(s.queue.map((item) => [item.id, item]))
+      for (const item of items) merged.set(item.id, { ...merged.get(item.id), ...item })
+      return { queue: [...merged.values()] }
+    }),
   removeItem: (id) =>
     set((s) => {
       const queue = s.queue.filter((q) => q.id !== id)

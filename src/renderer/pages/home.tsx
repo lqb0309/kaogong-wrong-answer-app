@@ -43,6 +43,7 @@ export function HomePage() {
   const [selected, setSelected] = useState<string[]>([])
   const [importing, setImporting] = useState(false)
   const [newQuestionOpen, setNewQuestionOpen] = useState(false)
+  const classifyingIdsRef = useRef(new Set<string>())
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number; fileName: string } | null>(null)
   const [cropTarget, setCropTarget] = useState<LibItem | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -58,7 +59,7 @@ export function HomePage() {
     try {
       const data = await window.api.getAppOverview()
       setOverview(data)
-      setPendingCount(data.pendingCount + data.classifiedCount)
+      setPendingCount(data.classifiedCount)
     } catch { /* ignore */ }
     // 今日归纳状态 + 今日复习进度
     try {
@@ -154,7 +155,7 @@ export function HomePage() {
         createdAt: q.created_at || ''
       }))
       setLibrary(items)
-      // 同步待确认角标（pending + classified）
+      // 待确认只统计已完成 AI 分类的题目；未分类题目单独展示
       window.api.getPendingCount().then(setPendingCount)
       return items
     } catch (err: any) {
@@ -260,11 +261,17 @@ export function HomePage() {
 
   // ── 批量 AI 分类（核心：按传入列表分类） ──
   const classifyItems = useCallback(async (items: LibItem[]) => {
-    if (items.length === 0) return
+    const uniqueItems = Array.from(new Map(items.map(item => [item.id, item])).values())
+      .filter(item => !classifyingIdsRef.current.has(item.id) && item.status === 'pending')
+    if (uniqueItems.length === 0) {
+      message.info('所选题目正在分类或已完成分类')
+      return
+    }
+    uniqueItems.forEach(item => classifyingIdsRef.current.add(item.id))
     setClassifying(true)
     clearClassifyJobs()
     const concurrency = 3
-    const queue = [...items]
+    const queue = [...uniqueItems]
     let doneCount = 0
 
     const worker = async () => {
@@ -285,6 +292,7 @@ export function HomePage() {
               confidence: aiResult.confidence || 0,
               ocr_text: aiResult.ocr_text || '',
               reasoning: aiResult.reasoning || '',
+              reflection: aiResult.reflection || '',
               match_type: aiResult.fuzzy_match_type || 'unknown',
               ai_raw_level1: aiResult.raw_level1 || aiResult.level1,
               ai_raw_level2: aiResult.raw_level2 || aiResult.level2,
@@ -312,10 +320,15 @@ export function HomePage() {
       }
     }
 
-    await Promise.all(Array.from({ length: concurrency }, () => worker()))
-    setClassifying(false)
-    setSelected([])
-    refreshOverview()
+    try {
+      await Promise.all(Array.from({ length: concurrency }, () => worker()))
+    } finally {
+      uniqueItems.forEach(item => classifyingIdsRef.current.delete(item.id))
+      setClassifying(false)
+      setSelected([])
+      await loadLibrary()
+      refreshOverview()
+    }
     if (doneCount > 0) {
       message.success(`AI 分类完成：${doneCount} 道`)
       // 流程接力：提示去确认（学习闭环第②步）

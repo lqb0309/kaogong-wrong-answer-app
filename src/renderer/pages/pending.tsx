@@ -235,6 +235,7 @@ export function PendingPage() {
         level2: current.level2,
         level3: current.level3,
         ocrText: current.ocrText,
+        errorType: current.errorType,
         traceId: current.traceId
       })
       if (result.success && result.reflection) {
