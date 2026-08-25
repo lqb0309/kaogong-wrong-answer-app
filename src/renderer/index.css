@@ -8,6 +8,13 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -16,7 +23,32 @@ body {
 }
 
 #root {
-  min-height: 100vh;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.app-content { min-width: 0; min-height: 0; }
+.app-content-fixed { overflow: hidden !important; }
+
+/* Settings columns share the same heading row so both cards start level. */
+.settings-column-title,
+.settings-panel > h4:first-child {
+  height: 32px;
+  margin: 0 0 16px !important;
+  display: flex;
+  align-items: center;
+}
+
+/* Ant Design wraps Sider content once more; make that real inner container fill the window. */
+.app-sidebar .ant-layout-sider-children {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.app-sidebar .ant-layout-sider-children > div:nth-child(2) {
+  min-height: 0;
+  flex: 1;
 }
 
 .ant-tree-treenode {
@@ -73,4 +105,267 @@ body {
   .stats-dashboard .ant-card-head-wrapper { flex-wrap: wrap; padding: 8px 0; gap: 8px; }
   .stats-dashboard .ant-card-extra { margin-left: 0; max-width: 100%; }
   .stats-dashboard .ant-picker-range { max-width: 100%; }
+}
+
+/* Pending confirmation: balanced preview and editing workspace. */
+.pending-workspace { align-items: flex-start; }
+.pending-preview-column,
+.pending-form-column { min-width: 0; }
+.pending-preview-card,
+.pending-form-card { overflow: hidden; }
+.pending-preview-card .ant-card-body { padding: 12px; }
+.pending-form-card .ant-card-body { padding: 10px 14px 14px; }
+
+.pending-image-stage {
+  position: relative;
+  height: clamp(280px, 42vh, 440px);
+  min-height: 280px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 14px 48px;
+  overflow: hidden;
+  border: 1px solid #edf0f4;
+  border-radius: 8px;
+  background: #f8f9fb;
+}
+.pending-image-navigation {
+  position: absolute;
+  left: 50%;
+  bottom: 9px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 3px 12px rgba(31, 35, 41, 0.08);
+  color: #8c8c8c;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.pending-image-stage .ant-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: 100%;
+}
+.pending-image-stage .ant-image-img { max-height: 100%; object-fit: contain; }
+.pending-image-stage .ant-image-mask { border-radius: 6px; }
+.pending-thumbnail-strip {
+  display: flex;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 2px 1px 5px;
+  overflow-x: auto;
+}
+
+.pending-form-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pending-section {
+  padding: 9px 10px;
+  border: 1px solid #eef0f3;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+.pending-tags-section { background: #fbfdff; }
+.pending-tag-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 7px;
+}
+.pending-field-grid {
+  display: grid;
+  grid-template-columns: minmax(126px, auto) minmax(210px, 1fr) minmax(210px, 1fr);
+  gap: 9px;
+  align-items: end;
+}
+.pending-field { min-width: 0; }
+.pending-graphics-toggle { margin-top: -2px; }
+.pending-reasoning {
+  padding: 7px 10px;
+  border: 1px solid #d9efc5;
+  border-radius: 8px;
+  background: #f7fff0;
+  line-height: 1.55;
+}
+.pending-reflection { background: #fffdf8; }
+.pending-reflection-input {
+  min-height: 104px;
+  margin-top: 4px;
+  line-height: 1.65;
+  resize: vertical;
+}
+.pending-action-bar {
+  display: flex;
+  gap: 10px;
+  margin: 0 -14px -14px;
+  padding: 10px 14px 14px;
+  border-top: 1px solid #f0f0f0;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(8px);
+}
+
+@media (min-width: 1200px) {
+  .pending-preview-card { position: sticky; top: 0; }
+  .pending-form-card { overflow: visible; }
+}
+
+/* Full-screen/high-window mode: use the available height without making compact windows scroll. */
+@media (min-width: 1200px) and (min-height: 850px) {
+  .pending-workspace {
+    min-height: calc(100vh - 138px);
+    align-items: stretch;
+  }
+  .pending-preview-column,
+  .pending-form-column { display: flex; }
+  .pending-preview-card,
+  .pending-form-card {
+    width: 100%;
+    height: 100%;
+  }
+  .pending-preview-card .ant-card-body {
+    height: calc(100% - 39px);
+    display: flex;
+    flex-direction: column;
+  }
+  .pending-image-stage {
+    height: auto;
+    max-height: none;
+    flex: 1;
+  }
+  .pending-form-card .ant-card-body { height: calc(100% - 39px); }
+  .pending-form-content { height: 100%; }
+  .pending-reflection {
+    min-height: 150px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+  .pending-reflection-input {
+    height: auto !important;
+    min-height: 160px !important;
+    max-height: none !important;
+    flex: 1 1 0;
+    resize: none;
+  }
+  .pending-action-bar { margin-top: auto; }
+}
+
+@media (max-width: 1450px) {
+  .pending-field-grid { grid-template-columns: minmax(126px, auto) minmax(220px, 1fr); }
+  .pending-source { grid-column: 1 / -1; }
+}
+
+@media (max-width: 1199px) {
+  .pending-image-stage { height: clamp(300px, 45vh, 460px); }
+  .pending-form-card { max-height: none; overflow: visible; }
+}
+
+@media (max-width: 700px) {
+  .pending-tag-actions { align-items: stretch; flex-wrap: wrap; }
+  .pending-tag-actions .ant-input { flex-basis: 100%; }
+  .pending-field-grid { grid-template-columns: 1fr; }
+  .pending-source { grid-column: auto; }
+  .pending-image-stage { min-height: 280px; padding: 12px 12px 52px; }
+}
+
+/* Focused reflection reader: question reference + full document reading. */
+.reflection-review-page {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.reflection-review-page > div:first-child { flex: 0 0 auto; }
+.reflection-review-count { margin-left: 6px; font-size: 15px; font-weight: 400; }
+.reflection-review-workspace {
+  display: grid;
+  grid-template-columns: minmax(320px, 5fr) minmax(460px, 7fr);
+  gap: 18px;
+  min-height: 0;
+  flex: 1;
+}
+.reflection-question-card,
+.reflection-document-card { height: 100%; overflow: hidden; }
+.reflection-question-card .ant-card-body {
+  height: calc(100% - 39px);
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+}
+.reflection-question-stage {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  border: 1px solid #edf0f4;
+  border-radius: 8px;
+  background: #f8f9fb;
+  overflow: hidden;
+}
+.reflection-question-stage .ant-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: 100%;
+}
+.reflection-question-stage .ant-image-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.reflection-question-meta { padding-top: 12px; }
+.reflection-question-nav { display: flex; justify-content: space-between; gap: 10px; margin-top: 10px; }
+.reflection-document-card .ant-card-head { padding: 0 16px; }
+.reflection-document-card .ant-card-body {
+  height: calc(100% - 39px);
+  padding: 0;
+  overflow: hidden;
+}
+.reflection-document-layout { height: 100%; display: flex; flex-direction: column; }
+.reflection-document-content { min-height: 0; flex: 1; overflow: hidden; }
+.reflection-document-content > .ant-spin-nested-loading,
+.reflection-document-content .ant-spin-container { height: 100%; }
+.reflection-document-reader {
+  height: 100%;
+  padding: 24px 28px 40px;
+  overflow-y: auto;
+  background: #fff;
+  font-size: 15px;
+  line-height: 1.85;
+}
+.reflection-document-reader .markdown-body { max-width: 780px; margin: 0 auto; }
+.reflection-document-editor {
+  height: 100% !important;
+  padding: 20px 24px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none !important;
+  resize: none;
+  font-size: 15px;
+  line-height: 1.8;
+}
+.reflection-confirm-bar {
+  display: grid;
+  grid-template-columns: auto minmax(240px, 1fr);
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid #edf0f4;
+  background: #fff;
+}
+
+@media (max-width: 1050px) {
+  .reflection-review-page { height: auto; overflow: visible; }
+  .reflection-review-workspace { grid-template-columns: 1fr; height: auto; }
+  .reflection-question-card { height: 430px; }
+  .reflection-document-card { height: 620px; }
 }

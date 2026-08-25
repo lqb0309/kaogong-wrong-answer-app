@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Typography, Button, Space, Tag, Input, Empty, App, Modal, Select, Popconfirm, Tooltip, Radio, Alert, Card, Row, Col, Switch } from 'antd'
+import { Typography, Button, Space, Tag, Input, Empty, App, Modal, Select, Popconfirm, Tooltip, Radio, Alert, Card, Row, Col, Switch, Image } from 'antd'
 import {
   CheckOutlined, StepForwardOutlined, ThunderboltOutlined,
-  LeftOutlined, RightOutlined, PlusOutlined, BulbOutlined,
-  PictureOutlined, EditOutlined, TagsOutlined, AppstoreOutlined, FileTextOutlined, BookOutlined
+  LeftOutlined, RightOutlined, PlusOutlined,
+  PictureOutlined, EditOutlined, TagsOutlined, AppstoreOutlined, FileTextOutlined, BookOutlined,
+  ReadOutlined
 } from '@ant-design/icons'
 import { usePendingStore } from '@/stores/pending'
 import { useSettingsStore } from '@/stores/settings'
@@ -40,7 +41,6 @@ export function PendingPage() {
   const [unknownActionItem, setUnknownActionItem] = useState<string | null>(null)
   const [newTagInput, setNewTagInput] = useState('')
   const [confirmLoading, setConfirmLoading] = useState(false)
-  const [reflectionLoading, setReflectionLoading] = useState(false)
   const [errorTypes, setErrorTypes] = useState<string[]>([])
   const [cropOpen, setCropOpen] = useState(false)
   const [cropImagePath, setCropImagePath] = useState('')
@@ -226,30 +226,6 @@ export function PendingPage() {
     message.success(`已添加自定义标签: ${newTagInput}`)
   }, [newTagInput, current, addCustomTag, message])
 
-  const handleGenerateReflection = useCallback(async () => {
-    if (!current) return
-    setReflectionLoading(true)
-    try {
-      const result = await window.api.generateReflection({
-        level1: current.level1,
-        level2: current.level2,
-        level3: current.level3,
-        ocrText: current.ocrText,
-        errorType: current.errorType,
-        traceId: current.traceId
-      })
-      if (result.success && result.reflection) {
-        updateItem(current.id, { reflection: result.reflection })
-        message.success('复盘思路已生成')
-      } else {
-        message.error(result.error || '生成失败')
-      }
-    } catch (err: any) {
-      message.error(`生成失败: ${err.message}`)
-    }
-    setReflectionLoading(false)
-  }, [current, updateItem, message])
-
   const handleTreeSelect = useCallback((node: any) => {
     if (!current || !treeSelectTarget) return
     setTreeSelectOpen(false)
@@ -332,6 +308,7 @@ export function PendingPage() {
                 <span style={{ fontSize: 12, color: '#888' }}>自动播放</span>
               </Tooltip>
             </Space>
+            <Button icon={<ReadOutlined />} onClick={() => navigate('/pending/review')}>专注复盘</Button>
             <Popconfirm title={`将队列中所有 ${queue.length} 张错题以 AI 建议标签直接入库？`} onConfirm={handleBatchConfirm} okText="全部入库" cancelText="取消">
               <Button icon={<ThunderboltOutlined />} disabled={queue.length === 0}>全部快速入库</Button>
             </Popconfirm>
@@ -339,22 +316,29 @@ export function PendingPage() {
         }
       />
 
-      <Row gutter={16}>
+      <Row gutter={[18, 18]} className="pending-workspace">
         {/* Left: Image + queue strip */}
-        <Col span={11}>
+        <Col xs={24} xl={10} className="pending-preview-column">
           <Card
             size="small"
+            className="pending-preview-card"
             title={<span><PictureOutlined style={{ color: '#1677ff' }} /> 题目图片</span>}
             extra={isLowConfidence && <Tag color="orange">低置信度 {Math.round(current.confidence * 100)}%</Tag>}
             style={{ border: isLowConfidence ? '1px solid #faad14' : undefined }}
           >
-            <div style={{ textAlign: 'center', minHeight: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <img
+            <div className="pending-image-stage">
+              <Image
                 src={current.imageUrl}
                 alt="错题截图"
                 onError={(e) => { (e.target as HTMLImageElement).src = IMG_FALLBACK }}
-                style={{ maxWidth: '100%', maxHeight: 420, objectFit: 'contain', borderRadius: 6 }}
+                preview={{ mask: '点击放大' }}
+                style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: 6, cursor: 'zoom-in' }}
               />
+              <div className="pending-image-navigation">
+                <Button size="small" icon={<LeftOutlined />} disabled={!canGoPrev} onClick={() => setCurrentIndex(currentIndex - 1)} />
+                <span>{currentIndex + 1} / {queue.length}</span>
+                <Button size="small" icon={<RightOutlined />} disabled={!canGoNext} onClick={() => setCurrentIndex(currentIndex + 1)} />
+              </div>
             </div>
 
             {isLowConfidence && (
@@ -364,7 +348,7 @@ export function PendingPage() {
 
             {/* 缩略图队列条 */}
             {queue.length > 1 && (
-              <div style={{ marginTop: 12, display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 4 }}>
+              <div className="pending-thumbnail-strip">
                 {queue.map((q, i) => (
                   <Tooltip key={q.id} title={`第 ${i + 1} 题${i === currentIndex ? '（当前）' : ''}`}>
                     <div onClick={() => setCurrentIndex(i)} style={{
@@ -381,28 +365,24 @@ export function PendingPage() {
               </div>
             )}
 
-            <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 12 }}>
-              <Button size="small" icon={<LeftOutlined />} disabled={!canGoPrev} onClick={() => setCurrentIndex(currentIndex - 1)} />
-              <Button size="small" icon={<RightOutlined />} disabled={!canGoNext} onClick={() => setCurrentIndex(currentIndex + 1)} />
-            </div>
           </Card>
         </Col>
 
         {/* Right: Info & Actions */}
-        <Col span={13}>
+        <Col xs={24} xl={14} className="pending-form-column">
           <Card
             size="small"
             title="确认信息"
-            style={{ maxHeight: 'calc(100vh - 140px)', overflow: 'auto' }}
+            className="pending-form-card"
           >
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div className="pending-form-content">
               {/* Classification warning */}
               {current.warning && (
                 <Alert type="warning" showIcon message="分类异常" description={current.warning} />
               )}
 
               {/* Tags */}
-              <div>
+              <div className="pending-section pending-tags-section">
                 <SectionLabel icon={<TagsOutlined style={{ color: '#1677ff' }} />}>AI 建议标签</SectionLabel>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                   <ChipTag current={current} updateItem={updateItem} onUnknownAction={(id, action) => {
@@ -416,14 +396,14 @@ export function PendingPage() {
                     }
                   }} />
                 </div>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
+                <div className="pending-tag-actions">
                   <Input
                     size="small"
                     placeholder="输入自定义标签..."
                     value={newTagInput}
                     onChange={(e) => setNewTagInput(e.target.value)}
                     onPressEnter={handleAddTag}
-                    style={{ width: 180 }}
+                    style={{ minWidth: 160, flex: 1 }}
                   />
                   <Button size="small" icon={<PlusOutlined />} onClick={handleAddTag}>添加</Button>
                   <Button size="small" onClick={() => { setTreeSelectTarget('tag'); setTreeSelectOpen(true) }}>从分类库选择</Button>
@@ -431,10 +411,10 @@ export function PendingPage() {
               </div>
 
               {/* 分类信息 */}
-              <div>
+              <div className="pending-section">
                 <SectionLabel icon={<AppstoreOutlined style={{ color: '#722ed1' }} />}>分类信息</SectionLabel>
-                <Space size="middle" wrap>
-                  <div>
+                <div className="pending-field-grid">
+                  <div className="pending-field pending-error-count">
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>错误次数</Typography.Text>
                     <div style={{ marginTop: 4 }}>
                       <Radio.Group
@@ -448,7 +428,7 @@ export function PendingPage() {
                       </Radio.Group>
                     </div>
                   </div>
-                  <div style={{ minWidth: 220 }}>
+                  <div className="pending-field pending-error-type">
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>错误类型</Typography.Text>
                     <div style={{ marginTop: 4 }}>
                       <Select
@@ -464,7 +444,7 @@ export function PendingPage() {
                       />
                     </div>
                   </div>
-                  <div style={{ flex: 1, minWidth: 200 }}>
+                  <div className="pending-field pending-source">
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>来源（可选）</Typography.Text>
                     <Input
                       size="small"
@@ -474,7 +454,7 @@ export function PendingPage() {
                       onChange={(e) => updateItem(current.id, { source: e.target.value })}
                     />
                   </div>
-                </Space>
+                </div>
               </div>
 
               {/* Graphics detection */}
@@ -540,7 +520,7 @@ export function PendingPage() {
 
               {/* Manual graphics toggle for non-detected questions */}
               {!current.hasGraphics && (
-                <div>
+                <div className="pending-graphics-toggle">
                   <Button size="small" type="dashed" icon={<PictureOutlined />}
                     onClick={() => {
                       setHasGraphics(true)
@@ -553,32 +533,24 @@ export function PendingPage() {
 
               {/* AI reasoning */}
               {current.reasoning && (
-                <div style={{ background: '#f6ffed', padding: '8px 12px', borderRadius: 6, border: '1px solid #b7eb8f' }}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>AI 分析：{current.reasoning}</Typography.Text>
+                <div className="pending-reasoning">
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}><strong>AI 分析：</strong>{current.reasoning}</Typography.Text>
                 </div>
               )}
 
               {/* 复盘思路 */}
-              <div>
+              <div className="pending-section pending-reflection">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <SectionLabel icon={<BookOutlined style={{ color: '#fa8c16' }} />}>复盘思路</SectionLabel>
-                  <Button
-                    size="small"
-                    icon={<BulbOutlined />}
-                    loading={reflectionLoading}
-                    onClick={handleGenerateReflection}
-                  >
-                    AI 生成
-                  </Button>
                 </div>
-                <Input.TextArea style={{ marginTop: 4 }} rows={3}
-                  placeholder={reflectionLoading ? '正在生成...' : '点击「AI 生成」或手动输入复盘思路...'}
+                <Input.TextArea className="pending-reflection-input" rows={3}
+                  placeholder="复盘思路会在识别时自动生成，也可以在这里手动修改..."
                   value={current.reflection || ''}
                   onChange={(e) => updateItem(current.id, { reflection: e.target.value })} />
               </div>
 
               {/* Action buttons */}
-              <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
+              <div className="pending-action-bar">
                 <Button onClick={handleSkip} icon={<StepForwardOutlined />} disabled={confirmLoading}>跳过</Button>
                 <Button
                   type="primary"

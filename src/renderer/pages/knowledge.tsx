@@ -51,6 +51,7 @@ export function KnowledgePage() {
   const [cardModalOpen, setCardModalOpen] = useState(false)
   const [cardModalContent, setCardModalContent] = useState('')
   const [cardModalTitle, setCardModalTitle] = useState('')
+  const [cardModalPath, setCardModalPath] = useState('')
   const [selectedDate, setSelectedDate] = useState<dayjs.Dayjs>(() => dayjs())
   const [noteModalOpen, setNoteModalOpen] = useState(false)
   const [noteModalContent, setNoteModalContent] = useState('')
@@ -168,7 +169,7 @@ export function KnowledgePage() {
   }
 
   const handleViewCard = async (card: any) => {
-    setCardModalTitle(card.title); setCardModalContent(''); setCardModalOpen(true)
+    setCardModalTitle(card.title); setCardModalPath(card.file_path || ''); setCardModalContent(''); setCardModalOpen(true)
     setCardQuestions([])
     // 卡片 ↔ 错题双向链：加载关联错题
     try {
@@ -460,6 +461,7 @@ export function KnowledgePage() {
                     <Button size="small" type="primary" ghost icon={<CheckOutlined />} onClick={() => handleMarkReview(card, 'done')}>记得</Button>
                     <Button size="small" type="primary" onClick={() => handleMarkReview(card, 'easy')}>轻松</Button>
                     <Button size="small" type="link" icon={<EyeOutlined />} onClick={() => handleViewCard(card)}>详情</Button>
+                    <Button size="small" type="link" icon={<ExportOutlined />} onClick={() => handleOpenCardInObsidian(card.file_path)}>Obsidian</Button>
                   </div>
                 </Card>
               </Col>
@@ -580,9 +582,9 @@ export function KnowledgePage() {
                   columns={[
                     { title: '标题', dataIndex: 'title', ellipsis: true, render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
                     { title: '类型', dataIndex: 'knowledge_type', width: 80, render: (v: string) => <Tag>{KNOWLEDGE_TYPE_LABELS[v] || v}</Tag> },
-                    { title: '操作', width: 130, render: (_: any, r: any) => <Space size={0}>
-                      <Button size="small" type="link" style={{ padding: '0 4px' }} onClick={() => handleViewCard(r)}><EyeOutlined /></Button>
-                      <Button size="small" type="link" style={{ padding: '0 4px' }} onClick={() => handleOpenCardInObsidian(r.file_path)}><ExportOutlined /></Button>
+                    { title: '操作', width: 190, render: (_: any, r: any) => <Space size={0}>
+                      <Button size="small" type="link" style={{ padding: '0 4px' }} icon={<EyeOutlined />} onClick={() => handleViewCard(r)}>详情</Button>
+                      <Button size="small" type="link" style={{ padding: '0 4px' }} icon={<ExportOutlined />} onClick={() => handleOpenCardInObsidian(r.file_path)}>Obsidian</Button>
                     </Space> }
                   ]} />}
           </Col>
@@ -609,7 +611,17 @@ export function KnowledgePage() {
         }]} />
 
       {/* Modals */}
-      <Modal title={cardModalTitle} open={cardModalOpen} onCancel={() => setCardModalOpen(false)} footer={null} width={720}>
+      <Modal
+        title={cardModalTitle}
+        open={cardModalOpen}
+        onCancel={() => setCardModalOpen(false)}
+        width={720}
+        footer={[
+          <Button key="close" onClick={() => setCardModalOpen(false)}>关闭</Button>,
+          <Button key="obsidian" type="primary" icon={<ExportOutlined />} disabled={!cardModalPath}
+            onClick={() => handleOpenCardInObsidian(cardModalPath)}>在 Obsidian 打开</Button>
+        ]}
+      >
         <div className="markdown-body" style={{ maxHeight: '45vh', overflow: 'auto', padding: 8, fontSize: 14, lineHeight: 1.8 }}>
           {cardModalContent ? <MarkdownRenderer content={cardModalContent} /> : '加载中...'}
         </div>

@@ -6,6 +6,7 @@ import { AppLayout } from './components/app-layout'
 // 路由级代码分割：按页面拆包，首屏只加载首页，提升启动速度
 const HomePage = lazy(() => import('./pages/home').then(m => ({ default: m.HomePage })))
 const PendingPage = lazy(() => import('./pages/pending').then(m => ({ default: m.PendingPage })))
+const ReflectionReviewPage = lazy(() => import('./pages/reflection-review').then(m => ({ default: m.ReflectionReviewPage })))
 const QuestionBankPage = lazy(() => import('./pages/question-bank').then(m => ({ default: m.QuestionBankPage })))
 const StatsPage = lazy(() => import('./pages/stats').then(m => ({ default: m.StatsPage })))
 const TagManagerPage = lazy(() => import('./pages/tag-manager').then(m => ({ default: m.TagManagerPage })))
@@ -34,6 +35,7 @@ export function AppRouter() {
         <Route path="/" element={lazyPage(<HomePage />)} />
         <Route path="/plan" element={lazyPage(<PlanPage />)} />
         <Route path="/pending" element={lazyPage(<PendingPage />)} />
+        <Route path="/pending/review" element={lazyPage(<ReflectionReviewPage />)} />
         <Route path="/questions" element={lazyPage(<QuestionBankPage />)} />
         <Route path="/stats" element={lazyPage(<StatsPage />)} />
         <Route path="/knowledge" element={lazyPage(<KnowledgePage />)} />

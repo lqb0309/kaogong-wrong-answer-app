@@ -17,6 +17,31 @@ const defaults: Record<string, any> = {
   image_compress_quality: 0.7, confidence_threshold: 0.7, weakness_threshold: 5, fast_induct_error_count: 1, upload_concurrency: 5,
   review_daily_count: 5, log_level: 'WARN', log_retention: 30, auto_classify_after_import: false, error_notify: true
 }
+const defaultReflectionPrompt = `请生成一份适合个人错题复习的精炼复盘，目标是让我下次遇到同类题时能识别、解出并避开原错误。
+
+严格按以下 Markdown 结构输出：
+
+## 考点与识别信号
+- 一句话说明核心考点。
+- 列出 2～3 个看到题目时应立即识别的关键词或结构信号。
+
+## 标准解题路径
+- 用 3～6 个步骤写出可靠解法，只保留必要推导。
+- 如题目信息不足以得到唯一答案，明确指出缺失信息，不得补造答案。
+
+## 考场最短路径
+- 给出可靠的快速定位、排除或简算方法。
+- 如果不存在稳定捷径，明确写“建议按标准步骤作答”，不要编造秒杀口诀。
+
+## 易错复盘
+- 如果题目中包含“你的答案”和“正确答案”，比较两个选项并指出具体误判点。
+- 如果有人工标注错误类型，结合该类型进一步解释。
+- 只有作答或题目信息不足时，才列出 1～2 个可能原因。
+
+## 下次行动规则
+用一条加粗句子给出可执行规则，格式为：**下次看到……，先……，再……。**
+
+全文控制在 400～800 个中文字符。不要重复题干，不写空泛鼓励，不提供无依据的蒙题结论。`
 
 export function SettingsPage() {
   const { config, loaded, load, set } = useSettingsStore()
@@ -41,6 +66,7 @@ export function SettingsPage() {
   useEffect(() => {
     if (!loaded) return
     const values = { ...defaults, ...config }
+    if (!values.reflection_prompt?.trim()) values.reflection_prompt = defaultReflectionPrompt
     ;['image_compress_threshold', 'image_compress_quality', 'confidence_threshold', 'weakness_threshold', 'fast_induct_error_count', 'upload_concurrency', 'review_daily_count', 'log_retention'].forEach(k => { values[k] = Number(values[k]) })
     ;['auto_classify_after_import', 'error_notify'].forEach(k => { values[k] = values[k] === true || values[k] === 'true' || (k === 'error_notify' && values[k] !== 'false') })
     form.setFieldsValue(values)
@@ -99,10 +125,10 @@ export function SettingsPage() {
     if (section === 'storage') return <><Title level={4}>存储与同步</Title><Card title="本地数据" style={{ marginBottom: 12 }}><Form.Item name="local_data_dir" label="错题与图片目录"><Input placeholder="留空使用默认目录" /></Form.Item></Card><Card title="EasyImage（可选）" style={{ marginBottom: 12 }}><Paragraph type="secondary">不配置时使用本地图片，不影响使用。</Paragraph><Form.Item name="easyimage_url" label="服务地址"><Input /></Form.Item><Form.Item name="easyimage_token" label="Token"><Input.Password /></Form.Item><Button onClick={async () => { const r = await window.api.testEasyImage(form.getFieldValue('easyimage_url'), form.getFieldValue('easyimage_token')); message[r.success ? 'success' : 'error'](r.success ? '连接正常' : r.error || '连接失败') }}>测试连接</Button></Card><Card title="Obsidian（可选）"><Form.Item name="obsidian_vault" label="Vault 路径"><Input placeholder="直接写 Markdown，无需插件" /></Form.Item></Card></>
     if (section === 'learning') return <><Title level={4}>学习流程</Title><Card><Row gutter={24}><Col span={12}><Form.Item name="auto_classify_after_import" label="导入后自动分类" valuePropName="checked"><Switch /></Form.Item><Form.Item name="review_daily_count" label="每日复习卡片数"><InputNumber min={1} max={50} style={{ width: '100%' }} /></Form.Item><Form.Item name="weakness_threshold" label="弱点提醒题数"><InputNumber min={1} max={100} style={{ width: '100%' }} /></Form.Item></Col><Col span={12}><Form.Item name="confidence_threshold" label="低置信度提醒阈值"><Slider min={0} max={1} step={0.05} /></Form.Item><Form.Item name="fast_induct_error_count" label="快速入库默认错误次数"><InputNumber min={1} max={10} style={{ width: '100%' }} /></Form.Item><Form.Item name="upload_concurrency" label="批量处理并发数"><InputNumber min={1} max={8} style={{ width: '100%' }} /></Form.Item></Col></Row></Card></>
     if (section === 'backup') return <><Title level={4}>备份与恢复</Title><Alert type="success" showIcon message="每次启动自动备份，保留最近 14 份；恢复前会再保存当前数据。" style={{ marginBottom: 12 }} /><Card><Space><Button type="primary" icon={<SafetyCertificateOutlined />} loading={backupLoading} onClick={async () => { setBackupLoading(true); try { const r = await window.api.createBackup(); setBackups(await window.api.listBackups()); message.success(`已创建 ${r.backup.name}`) } finally { setBackupLoading(false) } }}>立即备份</Button>{backups[0] && <Button icon={<FolderOpenOutlined />} onClick={() => window.api.openExternal(backups[0].path)}>打开目录</Button>}</Space><Divider />{backups.slice(0, 10).map(item => <div key={item.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid #f0f0f0' }}><div><Text strong>{item.name}</Text><br /><Text type="secondary">{new Date(item.createdAt).toLocaleString()} · {(item.size / 1048576).toFixed(1)} MB</Text></div><Popconfirm title="恢复这份备份？" description="应用将自动重启" onConfirm={() => window.api.restoreBackup(item.name)}><Button danger size="small">恢复</Button></Popconfirm></div>)}</Card></>
-    return <><Title level={4}>高级设置</Title><Card title="图片处理" style={{ marginBottom: 12 }}><Form.Item name="image_compress_threshold" label="压缩阈值（KB）"><InputNumber min={0} max={20480} /></Form.Item><Form.Item name="image_compress_quality" label="压缩质量"><Slider min={0.1} max={1} step={0.05} /></Form.Item></Card><Card title="分类 Prompt" style={{ marginBottom: 12 }}><Form.Item name="classify_prompt"><Input.TextArea rows={7} placeholder="留空使用内置 Prompt" /></Form.Item></Card><Card title="复盘 Prompt" style={{ marginBottom: 12 }} extra={<Button size="small" onClick={() => { form.setFieldValue('reflection_prompt', ''); message.info('已恢复内置复盘 Prompt，保存本页后生效') }}>恢复默认</Button>}><Paragraph type="secondary">用于控制复盘的结构、长度和侧重点。题目分类、OCR 与错误类型会由程序自动附加，无需写入 Prompt。</Paragraph><Form.Item name="reflection_prompt"><Input.TextArea rows={9} placeholder="留空使用内置五段式复盘 Prompt" /></Form.Item></Card><Card title="诊断日志"><Row gutter={12}><Col span={12}><Form.Item name="log_level" label="日志级别"><Select options={['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'].map(value => ({ value }))} /></Form.Item></Col><Col span={12}><Form.Item name="log_retention" label="保留天数"><InputNumber min={1} max={365} /></Form.Item></Col></Row><Form.Item name="error_notify" label="错误通知" valuePropName="checked"><Switch /></Form.Item></Card></>
+    return <><Title level={4}>高级设置</Title><Card title="图片处理" style={{ marginBottom: 12 }}><Form.Item name="image_compress_threshold" label="压缩阈值（KB）"><InputNumber min={0} max={20480} /></Form.Item><Form.Item name="image_compress_quality" label="压缩质量"><Slider min={0.1} max={1} step={0.05} /></Form.Item></Card><Card title="分类 Prompt" style={{ marginBottom: 12 }}><Form.Item name="classify_prompt"><Input.TextArea rows={7} placeholder="留空使用内置 Prompt" /></Form.Item></Card><Card title="复盘 Prompt" style={{ marginBottom: 12 }} extra={<Button size="small" onClick={() => { form.setFieldValue('reflection_prompt', defaultReflectionPrompt); message.info('已恢复内置复盘 Prompt，保存本页后生效') }}>恢复默认</Button>}><Paragraph type="secondary">下方已显示当前使用的完整复盘提示词，可以直接修改。题目分类、OCR、你的答案、正确答案与错误类型会由程序自动附加，无需重复写入。</Paragraph><Form.Item name="reflection_prompt"><Input.TextArea rows={18} /></Form.Item></Card><Card title="诊断日志"><Row gutter={12}><Col span={12}><Form.Item name="log_level" label="日志级别"><Select options={['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'].map(value => ({ value }))} /></Form.Item></Col><Col span={12}><Form.Item name="log_retention" label="保留天数"><InputNumber min={1} max={365} /></Form.Item></Col></Row><Form.Item name="error_notify" label="错误通知" valuePropName="checked"><Switch /></Form.Item></Card></>
   }
 
   const items = [{ key: 'overview', icon: <SettingOutlined />, label: '概览' }, { key: 'ai', icon: <ApiOutlined />, label: 'AI 模型' }, { key: 'billing', icon: <WalletOutlined />, label: '费用与余额' }, { key: 'storage', icon: <CloudOutlined />, label: '存储与同步' }, { key: 'learning', icon: <ExperimentOutlined />, label: '学习流程' }, { key: 'backup', icon: <DatabaseOutlined />, label: '备份与恢复' }, { key: 'advanced', icon: <SettingOutlined />, label: '高级设置' }]
   const showSave = !['overview', 'billing', 'backup'].includes(section)
-  return <div style={{ maxWidth: 1120 }}><PageHeader title="设置" subtitle="按任务分区管理，关键状态一眼可见" /><Form form={form} layout="vertical"><Row gutter={20} align="top"><Col xs={24} md={6} lg={5}><Card styles={{ body: { padding: 8 } }} style={{ position: 'sticky', top: 16 }}><Menu mode="inline" selectedKeys={[section]} items={items} onClick={({ key }) => setSection(key as Section)} /></Card></Col><Col xs={24} md={18} lg={19}><div style={{ minHeight: 540 }}>{render()}</div>{showSave && <Card style={{ marginTop: 16 }} styles={{ body: { display: 'flex', justifyContent: 'flex-end' } }}><Button type="primary" size="large" loading={saving} onClick={save}>保存本页设置</Button></Card>}</Col></Row></Form></div>
+  return <div className="settings-page" style={{ maxWidth: 1120 }}><PageHeader title="设置" subtitle="按任务分区管理，关键状态一眼可见" /><Form form={form} layout="vertical"><Row gutter={20} align="top"><Col xs={24} md={6} lg={5}><Title level={4} className="settings-column-title">设置分区</Title><Card styles={{ body: { padding: 8 } }} style={{ position: 'sticky', top: 16 }}><Menu mode="inline" selectedKeys={[section]} items={items} onClick={({ key }) => setSection(key as Section)} /></Card></Col><Col xs={24} md={18} lg={19}><div className="settings-panel" style={{ minHeight: 540 }}>{render()}</div>{showSave && <Card style={{ marginTop: 16 }} styles={{ body: { display: 'flex', justifyContent: 'flex-end' } }}><Button type="primary" size="large" loading={saving} onClick={save}>保存本页设置</Button></Card>}</Col></Row></Form></div>
 }

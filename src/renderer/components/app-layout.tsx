@@ -102,8 +102,9 @@ export function AppLayout() {
   ]
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout style={{ height: '100vh', overflow: 'hidden' }}>
       <Sider
+        className="app-sidebar"
         collapsible
         collapsed={collapsed}
         onCollapse={setCollapsed}
@@ -161,7 +162,7 @@ export function AppLayout() {
           </div>
         )}
       </Sider>
-      <Layout>
+      <Layout style={{ minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
         <div style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           padding: '6px 24px', background: '#fff', borderBottom: '1px solid #f0f0f0',
@@ -181,7 +182,10 @@ export function AppLayout() {
             </span>
           </Tooltip>
         </div>
-        <Content style={{ padding: 24, background: '#f5f7fa', overflow: 'auto' }}>
+        <Content
+          className={location.pathname === '/pending/review' ? 'app-content app-content-fixed' : 'app-content'}
+          style={{ padding: 24, background: '#f5f7fa', flex: '1 1 0', overflow: location.pathname === '/pending/review' ? 'hidden' : 'auto' }}
+        >
           <Outlet />
         </Content>
       </Layout>

@@ -468,7 +468,7 @@ export async function generateReflection(params: ReflectionParams, onProgress?: 
 
   const levelPath = [params.level1, params.level2, params.level3].filter(Boolean).join(' > ')
   const context = `【题目分类】${levelPath || '未分类'}
-【用户错误类型】${params.errorType || '未提供，请只标注为“可能原因”，不要武断判断'}
+【人工标注错误类型】${params.errorType || '无（请优先从 OCR 中的“你的答案/正确答案”及选项内容分析具体错因）'}
 【题目 OCR】
 ${params.ocrText || '未提供。不得虚构题干、选项、答案或数字，只能给出该题型的通用复盘框架。'}`
   const customPrompt = readConfig('reflection_prompt')?.trim()
@@ -489,14 +489,22 @@ ${params.ocrText || '未提供。不得虚构题干、选项、答案或数字�
 - 如果不存在稳定捷径，明确写“建议按标准步骤作答”，不要编造秒杀口诀。
 
 ## 易错复盘
-- 已提供用户错误类型时，围绕真实错误类型分析。
-- 未提供时，只能列出 1～2 个“可能原因”，不得断言用户为何做错。
+- 第一优先级：如果 OCR 中包含“你的答案”和“正确答案”，必须比较两个选项及其对应内容，指出本题具体错在什么判断、概念或步骤；不要再写“未提供错误类型”。
+- 第二优先级：如果提供了人工标注错误类型，结合该类型进一步解释。
+- 只有 OCR 中没有用户作答、正确答案或足够题目信息时，才列出 1～2 个“可能原因”。
 
 ## 下次行动规则
 用一条加粗句子给出可执行规则，格式为：**下次看到……，先……，再……。**
 
 全文控制在 400～800 个中文字符。不要重复题干，不写空泛鼓励，不提供无依据的蒙题结论。`
+  const universalRules = `
+【成品表达规则】
+- 直接面向学习者写复盘，不得出现“用户未提供”“字段缺失”“根据输入信息”等系统或数据处理措辞。
+- 优先使用通俗中文。若必须使用 ∀、∃、¬、→、↔ 等逻辑符号，第一次出现时必须在同一句紧跟中文含义；不能只写符号推导。
+- OCR 中出现“你的答案/正确答案”时，它们就是有效作答信息，必须用于具体分析错因。`
   const prompt = `${customPrompt || defaultPrompt}
+
+${universalRules}
 
 ${context}`
 
