@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { App, Button, Card, Empty, Image, Input, Modal, Segmented, Space, Spin, Tag, Typography } from 'antd'
-import { ArrowLeftOutlined, BulbOutlined, CheckOutlined, EditOutlined, LeftOutlined, ReadOutlined, RightOutlined } from '@ant-design/icons'
+import { App, Button, Card, Empty, Input, Modal, Segmented, Space, Spin, Tag, Typography } from 'antd'
+import { ArrowLeftOutlined, BulbOutlined, CheckOutlined, EditOutlined, LeftOutlined, ReadOutlined, RightOutlined } from '@/components/study-icons'
 import { PageHeader } from '@/components/page-header'
 import { MarkdownRenderer } from '@/components/markdown-renderer'
-import { usePendingStore } from '@/stores/pending'
+import { QuestionTextFallback } from '@/components/question-text-fallback'
+import { SafeImage } from '@/components/safe-image'
+import { usePendingStore, flushPendingDraft } from '@/stores/pending'
 import dayjs from 'dayjs'
-
-const IMG_FALLBACK = 'data:image/svg+xml;utf8,' + encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><rect width="120" height="120" fill="#f5f5f5"/><text x="60" y="62" font-size="12" text-anchor="middle" fill="#bbb">图片加载失败</text></svg>'
-)
 
 export function ReflectionReviewPage() {
   const navigate = useNavigate()
@@ -52,6 +50,7 @@ export function ReflectionReviewPage() {
     setLoading(true)
     try {
       const result = await window.api.generateReflection({
+        questionId: current.id,
         level1: current.level1,
         level2: current.level2,
         level3: current.level3,
@@ -75,6 +74,7 @@ export function ReflectionReviewPage() {
     const isLast = queue.length === 1
     setConfirmLoading(true)
     try {
+      await flushPendingDraft(current.id)
       const result = await window.api.writeToObsidian({
         id: current.id,
         imageUrl: current.imageUrl,
@@ -138,12 +138,11 @@ export function ReflectionReviewPage() {
       <div className="reflection-review-workspace">
         <Card size="small" title="题目" className="reflection-question-card">
           <div className="reflection-question-stage">
-            <Image
-              src={current.imageUrl}
-              fallback={IMG_FALLBACK}
-              alt="错题截图"
-              preview={{ mask: '点击放大' }}
-            />
+            {current.imageUrl ? <SafeImage
+                src={current.imageUrl}
+                alt="错题截图"
+                preview={{ mask: '点击放大' }}
+              /> : <QuestionTextFallback content={current.ocrText || ''} label="粉笔文字题目" />}
           </div>
           <div className="reflection-question-meta">
             <Space size={[4, 6]} wrap>{tags.map((tag) => <Tag key={tag}>{tag}</Tag>)}</Space>

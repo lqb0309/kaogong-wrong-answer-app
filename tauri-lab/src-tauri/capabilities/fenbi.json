@@ -1,0 +1,5 @@
+{
+  "identifier": "fenbi-capture-only", "windows": ["fenbi"], "local": false,
+  "remote": { "urls": ["https://spa.fenbi.com/ti/exam/solution/*"] },
+  "permissions": ["allow-capture-report"]
+}

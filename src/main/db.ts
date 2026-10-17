@@ -78,6 +78,15 @@ export function initDatabase(): void {
     try { db.exec(`ALTER TABLE questions ADD COLUMN sync_error TEXT`) } catch { /* already exists */ }
     try { db.exec(`ALTER TABLE questions ADD COLUMN last_synced_at TEXT`) } catch { /* already exists */ }
     try { db.exec(`ALTER TABLE questions ADD COLUMN deleted_at TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN question_number TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN material_image_ids TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN import_source TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN import_fingerprint TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN original_analysis TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN original_answer TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN question_images TEXT`) } catch { /* already exists */ }
+    try { db.exec(`ALTER TABLE questions ADD COLUMN option_images TEXT`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE questions ADD COLUMN source_snapshot TEXT`) } catch { /* already exists */ }
     db.exec(`
     CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
     CREATE INDEX IF NOT EXISTS idx_questions_level1 ON questions(level1);
@@ -85,6 +94,7 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_questions_created ON questions(created_at);
     CREATE INDEX IF NOT EXISTS idx_questions_file_hash ON questions(file_hash);
     CREATE INDEX IF NOT EXISTS idx_questions_sync_status ON questions(sync_status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_questions_import_fingerprint ON questions(import_fingerprint) WHERE import_fingerprint IS NOT NULL;
 
     CREATE VIRTUAL TABLE IF NOT EXISTS question_fts_v2 USING fts5(
       question_id UNINDEXED, ocr_text, reflection, source, error_type, level1, level2, level3,
@@ -108,6 +118,46 @@ export function initDatabase(): void {
       data TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS speed_training_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      question_id TEXT NOT NULL,
+      selected_answer TEXT,
+      correct_answer TEXT,
+      elapsed_seconds INTEGER NOT NULL,
+      target_seconds INTEGER NOT NULL,
+      is_correct INTEGER NOT NULL DEFAULT 0,
+      is_on_time INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(question_id) REFERENCES questions(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_speed_attempt_question ON speed_training_attempts(question_id, created_at);
+    CREATE TABLE IF NOT EXISTS speed_training_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      question_count INTEGER NOT NULL,
+      correct_count INTEGER NOT NULL,
+      elapsed_seconds INTEGER NOT NULL,
+      limit_seconds INTEGER NOT NULL,
+      accuracy REAL NOT NULL,
+      is_on_time INTEGER NOT NULL DEFAULT 0,
+      mode TEXT NOT NULL DEFAULT 'pdf',
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS fenbi_daily_sessions (
+      exercise_id TEXT PRIMARY KEY,
+      practice_date TEXT NOT NULL,
+      title TEXT NOT NULL,
+      question_count INTEGER NOT NULL,
+      correct_count INTEGER NOT NULL,
+      total_seconds INTEGER NOT NULL DEFAULT 0,
+      wrong_count INTEGER NOT NULL DEFAULT 0,
+      overtime_count INTEGER NOT NULL DEFAULT 0,
+      modules_json TEXT NOT NULL DEFAULT '{}',
+      points_json TEXT NOT NULL DEFAULT '[]',
+      source_url TEXT,
+      synced_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_fenbi_daily_date ON fenbi_daily_sessions(practice_date);
 
     CREATE TABLE IF NOT EXISTS login_days (
       date TEXT PRIMARY KEY
@@ -152,6 +202,24 @@ export function initDatabase(): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_test_attempts_created ON test_attempts(created_at);
+    CREATE TABLE IF NOT EXISTS review_batches (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      question_ids TEXT NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      filters_json TEXT NOT NULL,
+      files_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS review_batch_items (
+      batch_id TEXT NOT NULL,
+      question_id TEXT NOT NULL,
+      completed_at TEXT,
+      PRIMARY KEY(batch_id, question_id),
+      FOREIGN KEY(batch_id) REFERENCES review_batches(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_review_items_question ON review_batch_items(question_id, completed_at);
     CREATE TABLE IF NOT EXISTS ai_usage (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       feature TEXT NOT NULL,
@@ -177,6 +245,16 @@ export function initDatabase(): void {
       updated_at TEXT NOT NULL
     );
   `)
+  try { db.exec(`ALTER TABLE review_state ADD COLUMN fsrs_json TEXT`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE review_log ADD COLUMN scheduler_log TEXT`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE questions ADD COLUMN analysis_error TEXT`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE questions ADD COLUMN analysis_status TEXT`) } catch { /* already exists */ }
+  db.exec("UPDATE questions SET status = 'pending', analysis_status = 'failed', analysis_error = '上次导入在保存元数据前中断，请重新导入或手动处理' WHERE status = 'capturing'")
+  try { db.exec(`ALTER TABLE speed_training_attempts ADD COLUMN training_mode TEXT NOT NULL DEFAULT 'online'`) } catch { /* already exists */ }
+  // Legacy PDF attempts used a synthetic 0/1 timing pair. Exclude these from per-question timing metrics.
+  db.exec("UPDATE speed_training_attempts SET training_mode = 'pdf' WHERE elapsed_seconds = 0 AND target_seconds = 1")
+  try { db.exec(`ALTER TABLE question_groups ADD COLUMN material_images TEXT`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE question_groups ADD COLUMN practice_summary TEXT`) } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE ai_usage ADD COLUMN cost_source TEXT DEFAULT 'unpriced'`) } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE ai_usage ADD COLUMN price_input REAL DEFAULT 0`) } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE ai_usage ADD COLUMN price_output REAL DEFAULT 0`) } catch { /* already exists */ }

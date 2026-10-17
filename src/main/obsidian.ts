@@ -1,38 +1,47 @@
+import crypto from 'crypto'
 import { readConfig } from './config'
 import { logger } from './logger'
 import { getDb } from './db'
-import dayjs from 'dayjs'
 import fs from 'fs-extra'
 import path from 'path'
-import { resolveInside, safeMarkdownFileName, sanitizePathSegment } from './path-safety'
+import { resolveInside, sanitizePathSegment } from './path-safety'
+import { questionFileName } from './question-data'
 
 // ─── Direct vault file writer (no plugin needed) ───
 export function writeToVault(questionData: any): { success: boolean; vaultPath?: string; relativePath?: string } {
   const vaultRoot = readConfig('obsidian_vault')
   if (!vaultRoot) return { success: false }
 
-  const date = dayjs().format('YYYYMMDD')
-  const time = dayjs().format('HHmmss')
   const level1 = sanitizePathSegment(questionData.level1, '其他')
   const level2 = questionData.level2 ? sanitizePathSegment(questionData.level2, '') : ''
   const level3 = questionData.level3 ? sanitizePathSegment(questionData.level3, '') : ''
   // Always use full category path
   const subdir = level3 ? `${level1}/${level2}/${level3}` : level2 ? `${level1}/${level2}` : level1
 
-  const fileName = safeMarkdownFileName(questionData.fileName, `${date}-${time}.md`)
+  const fileName = questionFileName(questionData.id)
   const relativePath = subdir ? `${subdir}/${fileName}` : fileName
-  const fullPath = resolveInside(vaultRoot, relativePath)
+  let fullPath = ''
   const markdown = questionData.markdown || ''
   const traceId = questionData.traceId || null
 
   try {
+    fullPath = resolveInside(vaultRoot, relativePath)
     const dirPath = path.dirname(fullPath)
     // Handle case where a file exists at the directory path (e.g. from old writes)
     if (fs.existsSync(dirPath) && !fs.statSync(dirPath).isDirectory()) {
       throw new Error(`目标目录被同名文件占用: ${dirPath}`)
     }
     fs.ensureDirSync(dirPath)
-    fs.writeFileSync(fullPath, markdown, 'utf-8')
+    if (fs.existsSync(fullPath)) {
+      const existing = fs.readFileSync(fullPath, 'utf-8')
+      const owner = existing.match(/^question_id:\s*(.+)$/m)?.[1]
+      if (owner !== JSON.stringify(String(questionData.id))) throw new Error('目标笔记不属于当前题目，已保留原文件')
+    }
+    const temporary = `${fullPath}.${crypto.randomUUID()}.tmp`
+    try {
+      fs.writeFileSync(temporary, markdown, { encoding: 'utf-8', flag: 'wx' })
+      fs.renameSync(temporary, fullPath)
+    } finally { if (fs.existsSync(temporary)) fs.removeSync(temporary) }
     logger.info('vault', 'write_success', `写入 vault: ${fullPath}`, null, traceId)
     return { success: true, vaultPath: fullPath, relativePath }
   } catch (err: any) {
@@ -59,23 +68,25 @@ export function reorganizeVault(): { moved: number; skipped: number } {
   let moved = 0; let skipped = 0
 
   for (const q of questions) {
-    const oldFullPath = path.join(vaultRoot, q.obsidian_path)
+    const oldFullPath = resolveInside(vaultRoot, q.obsidian_path)
     if (!fs.existsSync(oldFullPath)) { skipped++; continue }
+    const owners = db.prepare('SELECT COUNT(*) c FROM questions WHERE obsidian_path = ?').get(q.obsidian_path) as { c: number }
+    if (owners.c > 1) { skipped++; continue }
 
-    const level1 = q.level1 || '其他'
-    const level2 = q.level2 || ''
-    const level3 = q.level3 || ''
+    const level1 = sanitizePathSegment(q.level1, '其他')
+    const level2 = q.level2 ? sanitizePathSegment(q.level2, '') : ''
+    const level3 = q.level3 ? sanitizePathSegment(q.level3, '') : ''
     const subdir = level3 ? `${level1}/${level2}/${level3}` : level2 ? `${level1}/${level2}` : level1
     const fileName = path.basename(q.obsidian_path)
     const newRelativePath = `${subdir}/${fileName}`
-    const newFullPath = path.join(vaultRoot, newRelativePath)
+    const newFullPath = resolveInside(vaultRoot, newRelativePath)
 
     if (oldFullPath === newFullPath) { skipped++; continue }
 
     try {
       const newDir = path.dirname(newFullPath)
       if (fs.existsSync(newDir) && !fs.statSync(newDir).isDirectory()) {
-        fs.removeSync(newDir)
+        throw new Error('目标目录被文件占用，已保留原文件')
       }
       fs.ensureDirSync(newDir)
       fs.moveSync(oldFullPath, newFullPath, { overwrite: false })

@@ -4,17 +4,14 @@ import { decryptToken } from './safe-storage'
 import { logger } from './logger'
 import OpenAI from 'openai'
 import { recordAiUsage } from './ai-usage'
+import { fitPlanTasks, taskKind, type PlanTask } from './plan-policy'
+import { aiOutputOptions, adjustmentSchema, forwardSchema, parseValidatedAi } from './ai-validation'
+import { studyCalendarDay } from './study-calendar'
+export type { PlanTask } from './plan-policy'
 
 // ============ 每日备考计划（AI 动态调整） ============
 
-export interface PlanTask {
-  id: string
-  title: string
-  detail: string
-  minutes: number
-  module: string
-  done: 0 | 1
-}
+export interface PlanAdjustmentInput { feedback?: string }
 
 export type PlanStatus = 'pending' | 'partial' | 'completed'
 
@@ -90,9 +87,9 @@ export interface ExamPhase {
 }
 
 const PHASE_FOCUS: Record<string, string> = {
-  '基础阶段': '打地基：资料分析每天必练（正确率目标 12/20→16/20）、判断/言语轮换刷题、政治理论每天刷 20 题、申论每周 2-3 次小题',
-  '强化阶段': '提速：资料分析提速到 8 分钟/组、每周 1-2 套全真套卷、申论每周 1 套完整、政治理论开始冲刺背诵',
-  '冲刺阶段': '全真模拟：每周 2 套套卷（严格按考试时间）、只复盘错题不再学新知识、政治时政冲刺背诵、调整作息保持状态'
+  '基础阶段': '模块轮换打基础，做题后留足复盘；优先弄懂薄弱点，不按固定题量堆任务',
+  '强化阶段': '专项提速与套题交替；行测、申论套题分天，做题与复盘时间 1:1 至 1:1.5',
+  '冲刺阶段': '套题检验节奏，复盘优先；时间不够就减量或单独复盘，不补偿式加练'
 }
 
 export function getExamPhase(): ExamPhase {
@@ -128,82 +125,45 @@ function weekDayName(dateStr: string): string {
   return names[parseDate(dateStr).getDay()]
 }
 
+const calendarDayInfo = studyCalendarDay
+
+function calendarDayDescription(dateStr: string): string {
+  const info = calendarDayInfo(dateStr)
+  return `${weekDayName(dateStr)}，${info.label}，建议总时长 ≤ ${info.maxMinutes} 分钟`
+}
+
 // ============ 默认计划（规则生成，无需 AI） ============
 
 function buildDefaultPlan(dateStr: string): DailyPlan {
-  const wd = parseDate(dateStr).getDay()
+  const day = calendarDayInfo(dateStr)
   const dayIndex = Math.floor(parseDate(dateStr).getTime() / 86400000)
-  const alt = dayIndex % 2 === 0 ? '判断推理' : '言语理解'
   const now = new Date().toISOString()
-
-  // 倒排阶段：离国考越近，任务重心越往"套卷 + 复盘"倾斜
-  const daysToExam = daysUntilFrom(dateStr)
-  const phase: 'base' | 'strong' | 'sprint' = daysToExam > 60 ? 'base' : daysToExam > 30 ? 'strong' : 'sprint'
-
   let tasks: PlanTask[]
-
-  if (wd === 6) {
-    // 周六：套卷日（冲刺阶段更强调全真模拟节奏）
+  if (day.kind !== 'workday') {
+    // 行测、申论分天；假期交替，普通周六行测、周日申论。
+    const essay = day.kind === 'weekend' ? day.scheduleWeekDay === 0 : dayIndex % 2 !== 0
+    const review = day.maxMinutes >= 300 ? 180 : 120
     tasks = [
-      { id: 't1', title: phase === 'sprint' ? '行测全真模拟（严格按考试时间 2 小时）' : '行测真题全真模拟（135题）', detail: phase === 'sprint' ? '按考试时间 9:00-11:00 全真模拟，用答题卡，中间不休息，模拟考场节奏。' : '严格计时 2 小时，用答题卡，含涂卡。资→判→言→常→数顺序，超时即停。', minutes: 120, module: '资料分析', done: 0 },
-      { id: 't2', title: '对答案并记录各模块正确率', detail: '整理一张正确率表，标注波动最大的模块，与上周对比。', minutes: 30, module: '复盘', done: 0 },
-      { id: 't3', title: '申论真题（小题 + 大作文）', detail: '作文必须写完；小题逐条抄材料、分条列点、控字数。', minutes: 120, module: '申论', done: 0 },
-      { id: 't4', title: phase === 'sprint' ? '政治理论：时政冲刺背诵' : '政治理论：专题背诵', detail: phase === 'sprint' ? '背机构时政冲刺 PDF 要点 + 本周刷题错题。' : '从《政治理论基础知识点手册》挑 1 个专题，睡前过一遍。', minutes: 30, module: '政治理论', done: 0 }
+      { id: 't1', title: essay ? '申论完整套题' : '行测全真模拟', detail: '只做这一套题，按所选试卷时限完成；若试卷时限更长，应另留足复盘时间或分日复盘，不追加模块训练。', minutes: 120, module: essay ? '申论' : '其他', kind: 'practice', done: 0 },
+      { id: 't2', title: essay ? '申论复盘与归纳' : '行测复盘与归纳', detail: essay ? '对照参考答案核对采分点、材料提炼与表达，归纳下次的作答框架，不抄整篇答案。' : '核对错题与耗时点，区分知识缺口、方法和节奏问题，选重点归纳；不是只记录正确率。', minutes: review, module: '复盘', kind: 'review', done: 0 }
     ]
-  } else if (wd === 0) {
-    // 周日：复盘日（冲刺阶段增加错题清零）
+  } else if (day.scheduleWeekDay === 3) {
     tasks = [
-      { id: 't1', title: '行测错题逐题复盘（本周末套卷）', detail: '错题三问：知识点不会？速度不够？粗心？完全不懂的考点看 10-20 分钟短视频并做 3 道同类题。', minutes: 90, module: '复盘', done: 0 },
-      { id: 't2', title: '申论对照参考答案', detail: '重点学小题的"点"怎么从材料里挖出来，抄写规范表达。', minutes: 60, module: '申论', done: 0 },
-      { id: 't3', title: phase === 'sprint' ? '错题本清零式复盘' : '本周错题本重做', detail: phase === 'sprint' ? '会的删、不会的当天弄懂，只留"真不会"的题。' : '做对的删掉，只留"真不会"的题。', minutes: 60, module: '复盘', done: 0 },
-      { id: 't4', title: '政治理论：本周错题重看 + 专题快背', detail: '把本周刷题错过的政治/时政题重新看一遍。', minutes: 30, module: '政治理论', done: 0 }
-    ]
-  } else if (wd === 3) {
-    // 周三：申论日（强化/冲刺阶段申论频率更高）
-    const shenlunTypes = ['归纳概括', '综合分析', '贯彻执行（应用文）']
-    const slType = shenlunTypes[dayIndex % 3]
-    tasks = [
-      { id: 't1', title: '资料分析 1 组（4 题）计时 + 复盘', detail: phase === 'strong' || phase === 'sprint' ? '限时 8 分钟（提速），超时即停；复盘错题三问。' : '限时 10 分钟，超时即停；复盘错题三问。', minutes: 20, module: '资料分析', done: 0 },
-      { id: 't2', title: `申论小题 1 道（${slType}）`, detail: '严格控字数、分条列点、只抄材料，不自由发挥。', minutes: 35, module: '申论', done: 0 },
-      { id: 't3', title: '对照参考答案 + 抄规范表达', detail: '学"点"怎么从材料里挖出来，积累规范词。', minutes: 20, module: '申论', done: 0 },
-      { id: 't4', title: '政治理论：背诵 1 个专题', detail: phase === 'sprint' ? '改背时政冲刺要点。' : '按手册专题顺序，每天一个，睡前过一遍。', minutes: 15, module: '政治理论', done: 0 }
+      { id: 't1', title: '申论小题练习', detail: '只练一类小题，控字数、提炼材料要点。', minutes: 30, module: '申论', kind: 'practice', done: 0 },
+      { id: 't2', title: '申论小题复盘', detail: '对照采分点，归纳漏点与表达问题，练习后留足复盘。', minutes: 45, module: '复盘', kind: 'review', done: 0 }
     ]
   } else {
-    // 周一/二/四/五：工作日（共 90 分钟，任务随阶段变化）
-    if (phase === 'strong') {
-      tasks = [
-        { id: 't1', title: '资料分析 2 组（4 题 ×2）计时 + 复盘', detail: '每组限时 8 分钟；目标正确率 ≥14/20，这是上 70 分的地基。', minutes: 40, module: '资料分析', done: 0 },
-        { id: 't2', title: `${alt} 1 组（15 题）计时 + 复盘`, detail: '限时 22 分钟（提速）；不懂的考点看短视频后立刻做 3 道同类题。', minutes: 25, module: alt, done: 0 },
-        { id: 't3', title: '政治理论/时政刷题 20 题', detail: '错题记进本子，周末集中重看。', minutes: 15, module: '政治理论', done: 0 },
-        { id: 't4', title: '错题三问归档', detail: '标原因：①知识点不会 ②速度不够 ③粗心。', minutes: 10, module: '复盘', done: 0 }
-      ]
-    } else if (phase === 'sprint') {
-      tasks = [
-        { id: 't1', title: '资料分析 1 组（4 题）计时 + 复盘', detail: '限时 8 分钟，保持手感；错题三问。', minutes: 20, module: '资料分析', done: 0 },
-        { id: 't2', title: `${alt} 混合 15 题计时（限时 20 分钟）`, detail: '冲刺期只练速度和准确率，不再学新技巧。', minutes: 22, module: alt, done: 0 },
-        { id: 't3', title: '政治理论：时政冲刺背诵', detail: '背时政冲刺 PDF + 刷题错题重看。', minutes: 18, module: '政治理论', done: 0 },
-        { id: 't4', title: '错题本清零式复盘', detail: '只重做本周错题，会的删，不会的当天弄懂。', minutes: 30, module: '复盘', done: 0 }
-      ]
-    } else {
-      tasks = [
-        { id: 't1', title: '资料分析 1 组（4 题）计时 + 复盘', detail: '限时 10 分钟，超时即停；复盘错题三问：知识点/速度/粗心。', minutes: 30, module: '资料分析', done: 0 },
-        { id: 't2', title: `${alt} 1 组（15 题）计时 + 复盘`, detail: '限时 25 分钟；不懂的考点看短视频后立刻做 3 道同类题。', minutes: 30, module: alt, done: 0 },
-        { id: 't3', title: '政治理论/时政刷题 20 题', detail: '用粉笔 App 刷政治理论题库，错题记进本子。', minutes: 15, module: '政治理论', done: 0 },
-        { id: 't4', title: '错题三问归档', detail: '今天所有错题标原因：①知识点不会 ②速度不够 ③粗心，写进错题本。', minutes: 15, module: '复盘', done: 0 }
-      ]
-    }
+    const module = dayIndex % 2 === 0 ? '判断推理' : '政治理论'
+    tasks = [
+      { id: 't1', title: '资料分析一组训练', detail: '按整组计时，题量根据当前熟练程度选择，不追求凑题数。', minutes: 15, module: '资料分析', kind: 'practice', done: 0 },
+      { id: 't2', title: module + '少量专项练习', detail: '集中一个薄弱点，到时停止，把时间留给复盘。', minutes: 20, module, kind: 'practice', done: 0 },
+      { id: 't3', title: '复盘与归纳总结', detail: '核对答案，重点分析错题与耗时点，归纳下次做法；不逐题抄解析。', minutes: 53, module: '复盘', kind: 'review', done: 0 }
+    ]
   }
-
-  return {
-    date: dateStr,
-    tasks,
-    status: 'pending',
-    note: '',
-    ai_adjusted: false,
-    adjustment_reason: '',
-    created_at: now,
-    updated_at: now
-  }
+  // 较短休息日采用最低 1:1，300 分钟套题日与工作日默认 1:1.5。
+  const fitted = fitPlanTasks(tasks, { remainingMinutes: day.maxMinutes, reviewRatio: day.kind !== 'workday' && day.maxMinutes < 300 ? 1 : 1.5 })
+  return { date: dateStr, tasks: fitted.tasks, status: 'pending', note: '', ai_adjusted: false,
+    adjustment_reason: fitted.warnings.join(' '), created_at: now, updated_at: now }
 }
 
 // ============ 数据存取 ============
@@ -261,39 +221,110 @@ function gapDays(prevDate: string, today: string): number {
   return Math.max(0, Math.round(diff))
 }
 
-// ============ 最近错题统计（喂给 AI 做数据依据） ============
+// ============ 结构化计划记忆（滚动归纳，不向 AI 倾倒原始历史） ============
 
-function recentWrongStats(): { byLevel1: string[]; total: number } {
-  const rows = getDb().prepare(`
-    SELECT level1, COUNT(*) as cnt FROM questions
-    WHERE status = 'confirmed' AND created_at >= date('now', '-7 days')
-    GROUP BY level1 ORDER BY cnt DESC
-  `).all() as { level1: string; cnt: number }[]
-  const total = rows.reduce((s, r) => s + r.cnt, 0)
-  const byLevel1 = rows.map(r => `${r.level1}: ${r.cnt} 题`)
-  return { byLevel1, total }
+const DEFAULT_PLAN_MEMORY_PREFERENCES = '在职备考；工作日约 90 分钟；一天只安排行测或申论其中一类完整套题；复盘优先，做题与复盘时间 1:1 至 1:1.5；补任务替换新任务，不叠加；状态不好时主动减量，不要求每天所有模块都练。'
+
+function planningRules(): string {
+  return `【必须遵守的安排边界】\n一天最多一类完整套题，行测与申论分开。套题日只做该套题与复盘，不追加每日刷题或补课。默认做题:复盘=1:1.5，最低1:1；复盘包含核对答案、错因分析、耗时点与归纳总结。时间不够则减少新题或改为复盘日，不能缩短完整套题用时来凑预算。未完成任务只替换新任务，不能叠加。用户已完成的任务不能重排；不要强制每天资料分析和政治刷题。临时反馈只影响今天；明确长期习惯才可归纳进长期偏好。`
+}
+
+function actualPracticeMinutes(date: string): number {
+  const row = getDb().prepare('SELECT SUM(total_seconds) AS seconds FROM fenbi_daily_sessions WHERE practice_date = ?').get(date) as { seconds?: number } | undefined
+  return Math.ceil(Number(row?.seconds || 0) / 60)
+}
+
+function remainingBudget(prev: DailyPlan, today: string): number {
+  if (prev.date !== today) return calendarDayInfo(today).maxMinutes
+  const done = prev.tasks.filter(t => t.done)
+  const recorded = actualPracticeMinutes(today)
+  const nonPractice = done.filter(t => taskKind(t) !== 'practice').reduce((n, t) => n + t.minutes, 0)
+  const spent = Math.max(done.reduce((n, t) => n + t.minutes, 0), recorded + nonPractice)
+  return Math.max(0, calendarDayInfo(today).maxMinutes - spent)
+}
+
+function safePlanTasks(raw: string): PlanTask[] {
+  try {
+    const parsed = JSON.parse(raw || '[]')
+    return Array.isArray(parsed) ? parsed : []
+  } catch { return [] }
+}
+
+function normalizeAnswer(value: unknown): string {
+  return String(value ?? '').trim().toUpperCase()
+}
+
+/** 生成紧凑的近 14 天记忆，每次生成计划时自动刷新。 */
+function buildPlanningMemoryText(before: string): string {
+  const planRows = getDb().prepare('SELECT * FROM daily_plans WHERE date < ? ORDER BY date DESC LIMIT 14').all(before) as any[]
+  let totalTasks = 0
+  let doneTasks = 0
+  const unfinishedModules = new Map<string, number>()
+  const feedback: string[] = []
+  let completedDays = 0
+  let partialDays = 0
+  let missedDays = 0
+
+  for (const row of planRows) {
+    const tasks = safePlanTasks(row.tasks_json)
+    totalTasks += tasks.length
+    doneTasks += tasks.filter(task => task.done).length
+    if (row.status === 'completed') completedDays++
+    else if (row.status === 'partial') partialDays++
+    else missedDays++
+    for (const task of tasks.filter(item => !item.done)) {
+      const module = task.module || '其他'
+      unfinishedModules.set(module, (unfinishedModules.get(module) || 0) + 1)
+    }
+    if (row.note?.trim() && feedback.length < 3) feedback.push(`${row.date}：${String(row.note).trim().slice(0, 100)}`)
+  }
+
+  const questionRows = getDb().prepare(`
+    SELECT level1, error_type, original_answer FROM questions
+    WHERE status = 'confirmed' AND created_at >= datetime(?, '-14 days') AND created_at < datetime(?, '+1 day')
+  `).all(before, before) as Array<{ level1?: string; error_type?: string; original_answer?: string }>
+  const modules = new Map<string, { total: number; wrong: number; overtime: number }>()
+  for (const row of questionRows) {
+    const module = row.level1?.trim() || '待确认'
+    const item = modules.get(module) || { total: 0, wrong: 0, overtime: 0 }
+    let answer: any = {}
+    try { answer = JSON.parse(row.original_answer || '{}') } catch { /* 旧数据无结构化答案 */ }
+    const correct = normalizeAnswer(answer.correct)
+    const user = normalizeAnswer(answer.user)
+    const type = row.error_type || answer.weaknessType || ''
+    const isWrong = (correct && user && correct !== user) || /结果错误|错误且超时/.test(type)
+    const isOvertime = Number(answer.overtimeSeconds || 0) > 0 || /超时/.test(type)
+    item.total++
+    if (isWrong) item.wrong++
+    if (isOvertime) item.overtime++
+    modules.set(module, item)
+  }
+
+  const completionRate = totalTasks ? Math.round(doneTasks / totalTasks * 100) : 0
+  const unfinished = [...unfinishedModules.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([name, count]) => `${name}${count}项`).join('、') || '无明显积压'
+  const performance = [...modules.entries()].sort((a, b) => (b[1].wrong + b[1].overtime) - (a[1].wrong + a[1].overtime)).slice(0, 6)
+    .map(([name, item]) => `${name}：收录${item.total}题，错${item.wrong}题，超时${item.overtime}题`).join('\n') || '（近 14 天无已确认题目）'
+  const preferences = readConfig('plan_memory_preferences')?.trim() || DEFAULT_PLAN_MEMORY_PREFERENCES
+  const futureNote = readConfig('plan_future_note')?.trim() || '无'
+  const corrections = readConfig('plan_user_corrections') || '[]'
+
+  return `【固定偏好】${preferences}
+【用户明确更正的长期偏好（最新更正优先）】${corrections}
+【近 14 天执行概况】记录 ${planRows.length} 天；完成率 ${completionRate}%（完成 ${completedDays} 天、部分完成 ${partialDays} 天、未完成 ${missedDays} 天）
+【反复未完成模块】${unfinished}
+【错题与超时分布】
+${performance}
+【最近用户反馈（注意日期，临时情况不要当作长期限制）】${feedback.length ? feedback.join('；') : '无'}
+【延续安排】${futureNote}`
 }
 
 // ============ AI 动态调整 ============
 
-/** 最近 N 条计划（含今天之前的所有，用于给 AI 看连续完成情况） */
-function recentPlansText(before: string, limit = 3): string {
-  const rows = getDb().prepare('SELECT * FROM daily_plans WHERE date < ? ORDER BY date DESC LIMIT ?').all(before, limit) as any[]
-  if (rows.length === 0) return '（无历史记录，今天是第一次使用）'
-  return rows.map(r => {
-    const tasks = JSON.parse(r.tasks_json || '[]') as PlanTask[]
-    const done = tasks.filter(t => t.done).length
-    return `- ${r.date}：${r.status === 'completed' ? '全部完成' : r.status === 'partial' ? '部分完成' : '未完成'}（${done}/${tasks.length} 项）${r.note ? '，备注: ' + r.note : ''}`
-  }).join('\n')
-}
-
-function buildAdjustPrompt(prev: DailyPlan, today: string): string {
-  const stats = recentWrongStats()
+function buildAdjustPrompt(prev: DailyPlan, today: string, input: PlanAdjustmentInput = {}): string {
   const exam = getExamInfo()
   const phase = getExamPhase()
   const doneCount = prev.tasks.filter(t => t.done).length
   const gap = gapDays(prev.date, today)
-  const futureNote = readConfig('plan_future_note') || ''
 
   const taskLines = prev.tasks.map(t =>
     `- [${t.done ? 'x' : ' '}] ${t.title}（${t.minutes}分钟，${t.module}）${t.detail ? '——' + t.detail : ''}`
@@ -303,37 +334,38 @@ function buildAdjustPrompt(prev: DailyPlan, today: string): string {
 【倒排目标】国考笔试 ${exam.exam_date}，距今约 ${exam.days_until} 天
 【当前阶段】${phase.name}（本阶段还剩约 ${phase.phase_days_left} 天）
 ${phase.focus ? '【阶段重点】' + phase.focus : ''}
-【距上次计划】${gap === 1 ? '昨天' : gap + ' 天前'}
+【距上次计划】${gap === 0 ? '今天' : gap === 1 ? '昨天' : gap + ' 天前'}
 
-【最近完成情况】（倒序，最近的在最上面）
-${recentPlansText(today, 3)}
+【个人计划记忆】
+${buildPlanningMemoryText(today)}
+${planningRules()}
+【本次用户更正】${input.feedback || '无额外更正'}
+【默认剩余时间预算】${remainingBudget(prev, today)} 分钟；若用户明确告知剩余时间，以用户为准，不要自己扩充预算
+【今天粉笔已记录做题时长】${actualPracticeMinutes(today)} 分钟，需为实际已做题目预留复盘
+${prev.date === today ? '只生成未完成任务，已完成任务将由程序原样保留。' : ''}
 
 【上次计划与完成情况】
 日期: ${prev.date}
+日期类型: ${calendarDayDescription(prev.date)}
 状态: ${prev.status === 'completed' ? '全部完成' : prev.status === 'partial' ? '部分完成' : '未完成'}（${doneCount}/${prev.tasks.length} 项完成）
 用户备注: ${prev.note || '（无）'}
 任务列表:
 ${taskLines}
 
-【最近 7 天已确认错题分布】
-${stats.byLevel1.length ? stats.byLevel1.join('\n') : '（无）'}（共 ${stats.total} 题）
-
-【此前 AI 对未来的安排提示】${futureNote || '（无）'}
-
-【今天的星期类型】${weekDayName(today)}
-${[6].includes(parseDate(today).getDay()) ? '（周六：建议总时长 ≤ 300 分钟）' : [0].includes(parseDate(today).getDay()) ? '（周日：建议总时长 ≤ 240 分钟）' : '（工作日：建议总时长 ≤ 90 分钟）'}
+【今天的日期类型】${calendarDayDescription(today)}
 
 请根据以上信息，生成今天的备考计划：
 - 如果最近有未完成，主动调整任务量和顺序，帮助恢复节奏（不要苛责，不要安排得过满）
 - 考虑当前倒排阶段：基础阶段以模块训练为主、强化阶段提速、冲刺阶段以套卷和复盘为主
-- 资料分析是每天必练的地基，政治理论每天都要刷题
-- 每个任务给出：title(简短标题)、detail(具体怎么做)、minutes(预计分钟数)、module(资料分析/判断推理/言语理解/数量关系/常识判断/政治理论/申论/复盘/其他)
-- 只输出 JSON：{"tasks": [...], "adjustment_summary": "一句话说明你调整了什么、为什么", "future_note": "对接下来几天安排的简短提示，如明天申论日、后天套卷日"}
+- 优先复盘；模块轮换，套题与复盘占满预算时不要安排额外模块
+- 每个任务给出：title、detail、minutes、module、kind(practice/review/other)。不要把做题和复盘合并成一项
+- 从用户自然语言中提取 remaining_minutes（今天还剩多少分钟；未说明则不输出，0代表休息），review_ratio（仅1或1.5，默认1.5），review_only（只复盘/今天不做新题时true）。不要安排用户明确拒绝的内容
+- 只输出 JSON：{"tasks": [...], "adjustment_summary": "一句话说明调整", "future_note": "后续安排", "remaining_minutes":90, "review_ratio":1.5,"review_only":false}
 - 不要输出 JSON 以外的内容`
 }
 
 /** 调用 AI 生成调整后的计划；失败返回 null（由调用方回退到默认计划） */
-async function adjustWithAi(prev: DailyPlan, today: string): Promise<{ plan: DailyPlan; summary: string } | null> {
+async function adjustWithAi(prev: DailyPlan, today: string, input: PlanAdjustmentInput = {}): Promise<{ plan: DailyPlan; summary: string; futureNote: string } | null> {
   const reasonKey = readConfig('ai_api_key')
   const reasonURL = readConfig('ai_base_url') || 'https://api.deepseek.com'
   const reasonModel = readConfig('ai_model') || 'deepseek-chat'
@@ -348,57 +380,66 @@ async function adjustWithAi(prev: DailyPlan, today: string): Promise<{ plan: Dai
   const baseURL = reasonKey ? reasonURL : (readConfig('vision_base_url') || 'https://dashscope.aliyuncs.com/compatible-mode/v1')
   const model = reasonKey ? reasonModel : (readConfig('vision_model') || 'qwen-vl-max')
 
-  const client = new OpenAI({ apiKey, baseURL })
+  const client = new OpenAI({ apiKey, baseURL, timeout: 90_000, maxRetries: 0 })
 
   try {
     logger.info('daily_plan', 'adjust_start', `AI 调整 ${today} 的计划`, { model, prevDate: prev.date })
+    let parsed: any = null
+    for (let attempt = 0; attempt < 2; attempt++) {
     const resp = await client.chat.completions.create({
       model,
       messages: [
         {
           role: 'system',
-          content: '你是一位严厉又务实的考公备考教练。用户在职备考，每天最多约 90 分钟（周末除外），目标是国考（副省级，行测 135 题），需要从考试日倒排安排每天任务。你的任务是：根据用户最近的完成情况和错题数据，结合倒排阶段，生成今天的备考计划。计划要具体、可执行、不过满。用中文回复。'
+          content: '你是一位务实、尊重用户精力的备考教练。优先消化已做题目，不用任务数量制造压力。不苛责、不补偿式加量。按用户更正、实际用时和时间预算安排，区分临时情况与长期习惯，只输出完整 JSON，不输出思考过程。'
         },
-        { role: 'user', content: buildAdjustPrompt(prev, today) }
+        { role: 'user', content: buildAdjustPrompt(prev, today, input) + (attempt ? '\n上次输出不合格，请只输出完整JSON，所有分钟必须是数字，模块使用给定中文名称。' : '') }
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 2500
+      ...aiOutputOptions(baseURL, model, 2500, attempt + 1)
     })
     recordAiUsage(resp, 'daily_plan', reasonKey ? 'reason' : 'vision', model)
 
-    const content = resp.choices[0]?.message?.content || ''
-    let parsed: any
     try {
-      parsed = JSON.parse(content)
-    } catch {
-      logger.warn('daily_plan', 'adjust_parse_failed', 'AI 返回非 JSON，回退默认计划', { raw: content.slice(0, 200) })
-      return null
+      parsed = parseValidatedAi(resp.choices[0]?.message?.content || '', adjustmentSchema, resp.choices[0]?.finish_reason)
+      break
+    } catch (error: any) {
+      logger.warn('daily_plan', 'adjust_parse_failed', 'AI 计划未通过字段校验', { attempt: attempt + 1, error: error.message })
     }
+    }
+    if (!parsed) return null
 
     const tasks = normalizeAiTasks(parsed.tasks)
-    if (!tasks || tasks.length === 0) {
+    if (!tasks) {
       logger.warn('daily_plan', 'adjust_empty', 'AI 未返回有效任务，回退默认计划')
       return null
     }
 
-    // 保存 AI 对未来的安排提示，供后续日子和页面使用
-    if (typeof parsed.future_note === 'string' && parsed.future_note.trim()) {
-      try { writeConfig('plan_future_note', parsed.future_note.trim()) } catch { /* ignore */ }
-    }
-
+    const feedback = input.feedback || ''
+    const completed = prev.date === today ? prev.tasks.filter(t => t.done) : []
+    const hasTimeCorrection = /(?:还剩|只剩|剩余|还能|可用|只有|最多|再学|再花|有).{0,8}(?:\d+|[一二三四五六七八九十半两]+)\s*(?:个)?(?:分钟|小时)/.test(feedback)
+    const requestedMinutes = Number(parsed.remaining_minutes)
+    const budget = requestedMinutes === 0 && /休息|没时间|收工|不学/.test(feedback) ? 0
+      : hasTimeCorrection && Number.isFinite(requestedMinutes) && requestedMinutes >= 0
+        ? Math.min(600, Math.floor(requestedMinutes)) : /(?:今天|今日).{0,12}(?:上班|工作日|补班)/.test(feedback) ? Math.min(90, remainingBudget(prev, today)) : remainingBudget(prev, today)
+    const ratio = parsed.review_ratio === 1 ? 1 : 1.5
+    const reviewOnly = parsed.review_only === true || /只.{0,8}复盘|不做(?:新)?题|不刷题/.test(feedback)
+    const fitted = fitPlanTasks(reviewOnly ? tasks.filter(t => taskKind(t) !== 'practice') : tasks, {
+      remainingMinutes: budget, reviewRatio: ratio, completed, actualPracticeMinutes: actualPracticeMinutes(today)
+    })
     const now = new Date().toISOString()
     const plan: DailyPlan = {
       date: today,
-      tasks,
-      status: 'pending',
-      note: '',
+      tasks: fitted.tasks,
+      status: fitted.tasks.length > 0 && fitted.tasks.every(t => t.done) ? 'completed' : completed.length > 0 ? 'partial' : 'pending',
+      note: prev.date === today ? prev.note : '',
       ai_adjusted: true,
-      adjustment_reason: typeof parsed.adjustment_summary === 'string' ? parsed.adjustment_summary : 'AI 已根据最近完成情况调整了今天的计划',
-      created_at: now,
+      adjustment_reason: [typeof parsed.adjustment_summary === 'string' ? parsed.adjustment_summary : '已按实际情况调整今天的计划', ...fitted.warnings, fitted.tasks.length === completed.length ? '今天不再新增任务，可以收工。' : ''].filter(Boolean).join('\n'),
+      created_at: prev.date === today ? prev.created_at : now,
       updated_at: now
     }
     logger.info('daily_plan', 'adjust_done', `AI 计划生成完成: ${tasks.length} 项任务`, { model })
-    return { plan, summary: plan.adjustment_reason }
+    return { plan, summary: plan.adjustment_reason, futureNote: typeof parsed.future_note === 'string' ? parsed.future_note.trim() : '' }
   } catch (err: any) {
     logger.error('daily_plan', 'adjust_failed', `AI 调整失败: ${err.message}`, { model })
     return null
@@ -414,7 +455,7 @@ function normalizeAiTasks(raw: any): PlanTask[] | null {
     const title = typeof item.title === 'string' ? item.title.trim() : ''
     if (!title || seen.has(title)) continue
     seen.add(title)
-    const minutes = Math.min(300, Math.max(5, Number(item.minutes) || 30))
+    const minutes = Math.min(300, Math.max(5, Math.ceil(Number(item.minutes) || 30)))
     const module = MODULES.includes(item.module) ? item.module : (typeof item.module === 'string' && item.module ? item.module : '其他')
     tasks.push({
       id: `t${tasks.length + 1}`,
@@ -422,10 +463,11 @@ function normalizeAiTasks(raw: any): PlanTask[] | null {
       detail: typeof item.detail === 'string' ? item.detail.trim() : '',
       minutes,
       module,
+      kind: ['practice', 'review', 'other'].includes(item.kind) ? item.kind : undefined,
       done: 0
     })
   }
-  return tasks.length > 0 ? tasks : null
+  return raw.length > 0 && tasks.length === 0 ? null : tasks
 }
 
 /** 规则回退：把昨天没完成的任务顺延到今天（最多 2 项，去掉大块套卷类） */
@@ -440,7 +482,12 @@ function carryOverUnfinished(prev: DailyPlan | null, base: DailyPlan): DailyPlan
     done: 0 as const
   }))
   if (carry.length === 0) return base
-  return { ...base, tasks: [...carry, ...base.tasks], adjustment_reason: '昨天有任务未完成，已自动顺延到今天' }
+  // 补任务替换当天练习；套题日不补，绝不直接追加到原任务单。
+  if (base.tasks.some(t => t.minutes >= 100 && taskKind(t) === 'practice')) return base
+  const fitted = fitPlanTasks([...carry, ...base.tasks.filter(t => taskKind(t) === 'review')], {
+    remainingMinutes: calendarDayInfo(base.date).maxMinutes, reviewRatio: 1.5
+  })
+  return { ...base, tasks: fitted.tasks, adjustment_reason: ['未完成任务已替换今天的新练习，不额外加量。', ...fitted.warnings].join(' ') }
 }
 
 // ============ 对外接口 ============
@@ -470,7 +517,9 @@ async function doEnsurePlanFor(dateStr: string): Promise<DailyPlan> {
 
   if (prev && !isCompleted(prev)) {
     // 上次未完成 → AI 动态调整
-    plan = (await adjustWithAi(prev, dateStr))?.plan || null
+    const adjusted = await adjustWithAi(prev, dateStr)
+    plan = adjusted?.plan || null
+    if (adjusted?.futureNote) writeConfig('plan_future_note', adjusted.futureNote)
   }
 
   if (!plan) {
@@ -490,6 +539,7 @@ export function updatePlanTask(dateStr: string, taskId: string, done: boolean): 
   const task = plan.tasks.find(t => t.id === taskId)
   if (!task) return null
   task.done = done ? 1 : 0
+  plan.status = plan.tasks.every(t => t.done) ? 'completed' : plan.tasks.some(t => t.done) ? 'partial' : 'pending'
   plan.updated_at = new Date().toISOString()
   insertPlan(plan)
   return plan
@@ -500,19 +550,47 @@ export function completePlanTaskForActivity(activity: 'review' | 'test', modules
   const plan = loadPlan(today)
   if (!plan) return null
   const normalized = new Set(modules.filter(Boolean))
-  const eligible = activity === 'review'
-    ? quantity >= Math.max(1, Number(readConfig('review_daily_count') || 5))
-    : quantity >= 10
-  if (!eligible) return null
+  if (quantity <= 0) return null
   const candidate = plan.tasks.find(task => {
     if (task.done) return false
+    const content = `${task.title} ${task.detail}`
+    // Quantity alone cannot prove a full paper or deep review was completed.
+    if (/套题|套卷|全真|模拟|归纳|总结/.test(content)) return false
+    const requested = Number(content.match(/(\d+)\s*(?:题|张)/)?.[1] || 0)
+    if (!requested || quantity < requested) return false
     if (activity === 'review') return task.module === '复盘' && /复盘|错题/.test(task.title)
-    return normalized.has(task.module) && /题|模拟|练习|套卷/.test(task.title)
+    return normalized.has(task.module) && /题|练习/.test(task.title)
   })
   if (!candidate) return null
   const updated = updatePlanTask(today, candidate.id, true)
   const completed = updated?.tasks.find(task => task.id === candidate.id) || null
   if (completed) logger.info('daily_plan', 'activity_auto_complete', `学习行为自动完成计划: ${completed.title}`, { activity, quantity, modules })
+  return completed
+}
+
+export function completePlanTasksFromFenbi(moduleCounts: Record<string, number>, summary = ''): PlanTask[] {
+  const today = localDateStr()
+  const plan = loadPlan(today)
+  if (!plan) return []
+  const completed: PlanTask[] = []
+  for (const task of plan.tasks) {
+    if (task.done || !moduleCounts[task.module]) continue
+    if (!/题|练习|刷题|模拟|套卷/.test(`${task.title} ${task.detail}`)) continue
+    if (/套题|套卷|全真|模拟|复盘|归纳|总结/.test(`${task.title} ${task.detail}`)) continue
+    const requested = Number(`${task.title} ${task.detail}`.match(/(\d+)\s*题/)?.[1] || 0)
+    if (!requested) continue
+    if (moduleCounts[task.module] < requested) continue
+    task.done = 1
+    completed.push(task)
+  }
+  if (completed.length || summary) {
+    const doneCount = plan.tasks.filter(task => task.done).length
+    plan.status = doneCount === plan.tasks.length ? 'completed' : doneCount > 0 ? 'partial' : plan.status
+    if (summary && !plan.note.includes(summary)) plan.note = [plan.note, summary].filter(Boolean).join('\n')
+    plan.updated_at = new Date().toISOString()
+    insertPlan(plan)
+    logger.info('daily_plan', 'fenbi_auto_complete', `粉笔同步自动完成 ${completed.length} 项任务`, { modules: moduleCounts })
+  }
   return completed
 }
 
@@ -586,43 +664,64 @@ export async function generateForwardPlan(): Promise<{ success: boolean; plan?: 
 
   const exam = getExamInfo()
   const phase = getExamPhase()
-  const stats = recentWrongStats()
   const today = localDateStr()
-  const futureNote = readConfig('plan_future_note') || ''
 
   const prompt = `【倒排目标】国考笔试 ${exam.exam_date}，距今约 ${exam.days_until} 天
 【当前阶段】${phase.name}（本阶段还剩 ${phase.phase_days_left} 天）
 【阶段重点】${phase.focus || '（无）'}
 【今天】${today}（${weekDayName(today)}）
-【最近完成情况】
-${recentPlansText(today, 5)}
-【最近 7 天已确认错题分布】
-${stats.byLevel1.length ? stats.byLevel1.join('\n') : '（无）'}（共 ${stats.total} 题）
-【此前 AI 的未来安排提示】${futureNote || '（无）'}
+【未来 7 天日期类型】
+${Array.from({ length: 7 }, (_, index) => {
+    const date = addDaysStr(today, index + 1)
+    return `- ${date}：${calendarDayDescription(date)}`
+  }).join('\n')}
+【个人计划记忆】
+${buildPlanningMemoryText(today)}
+${planningRules()}
 
 请以国考日 ${exam.exam_date} 为终点倒排，生成从明天开始的未来 7 天备考安排：
-- 结合当前阶段（基础/强化/冲刺）安排每天重心：资料分析必练、判断/言语轮换、政治理论每天、申论每周 2-3 次、周末安排套卷和复盘
+- 模块轮换，一天不同时做行测与申论套题，每次套题都留足复盘与归纳时间；时间不够就做复盘或少量专项
 - 考虑用户最近完成情况和薄弱模块
 - 每天 1 条安排：title(当天主题，如"申论日""套卷日""复盘日")、detail(具体做什么、预计多久)
-- 输出 JSON：{"overview": "对整体安排的一句话说明", "days": [{"date": "YYYY-MM-DD", "title": "...", "detail": "..."}]}
+- 每天提供tasks，最多3项；每项title/detail/minutes/module/kind(practice/review/other)，做题和复盘分项。review_ratio为1或1.5
+- 输出 JSON：{"overview": "整体说明", "days": [{"date": "YYYY-MM-DD", "title": "...", "detail": "...", "review_ratio":1.5,"tasks":[{"title":"...","detail":"...","minutes":30,"module":"复盘","kind":"review"}]}]}
 - 只输出 JSON，不要其他内容`
 
   try {
     logger.info('daily_plan', 'forward_start', 'AI 生成未来一周倒排安排', { model })
-    const client = new OpenAI({ apiKey, baseURL })
-    const resp = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: '你是一位考公备考教练，擅长从考试日倒排制定备考计划。用户在职，每天最多约 90 分钟（周末可多）。用中文回复。' },
-        { role: 'user', content: prompt }
-      ],
-      response_format: { type: 'json_object' },
-      max_tokens: 2500
-    })
-    recordAiUsage(resp, 'forward_plan', reasonKey ? 'reason' : 'vision', model)
+    const client = new OpenAI({ apiKey, baseURL, timeout: 90_000, maxRetries: 0 })
+    let parsed: any = null
+    let lastParseError = '未知错误'
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const compactInstruction = '\n每天最多3项任务，每项detail不超过30字，overview不超过50字。' + (attempt === 1 ? '' : '\n上次输出被截断。禁止展示思考过程，直接输出单行紧凑 JSON，每天detail不超过40字。')
+      const resp = await client.chat.completions.create({
+        model,
+        messages: [
+          { role: 'system', content: '你是一位考公备考教练。只输出紧凑、完整、可解析的 JSON，不展示推理过程。' },
+          { role: 'user', content: prompt + compactInstruction }
+        ],
+        response_format: { type: 'json_object' },
+        ...aiOutputOptions(baseURL, model, attempt === 1 ? 3200 : 4200, attempt)
+      })
+      recordAiUsage(resp, 'forward_plan', reasonKey ? 'reason' : 'vision', model)
 
-    const content = resp.choices[0]?.message?.content || ''
-    const parsed = JSON.parse(content)
+      const content = resp.choices[0]?.message?.content || ''
+      try {
+        parsed = parseValidatedAi(content, forwardSchema, resp.choices[0]?.finish_reason)
+        if (parsed.days.some((day: any, index: number) => day.date !== addDaysStr(today, index + 1))) throw new Error('未来安排日期不连续或与请求不匹配')
+        break
+      } catch (parseError: any) {
+        lastParseError = parseError.message || 'JSON 解析失败'
+        logger.warn('daily_plan', 'forward_invalid_json', `未来安排 JSON 无效，${attempt < 2 ? '准备重试' : '重试结束'}`, {
+          attempt,
+          finishReason: resp.choices[0]?.finish_reason,
+          contentLength: content.length,
+          error: lastParseError
+        })
+        parsed = null
+      }
+    }
+    if (!parsed) throw new Error(`AI 返回的未来安排不完整，自动重试后仍无法解析（${lastParseError}）`)
     const days: ForwardPlan['days'] = []
     if (Array.isArray(parsed.days)) {
       const start = parseDate(today)
@@ -631,10 +730,13 @@ ${stats.byLevel1.length ? stats.byLevel1.join('\n') : '（无）'}（共 ${stats
         if (!item || typeof item !== 'object') continue
         const d = new Date(start)
         d.setDate(d.getDate() + i + 1)
+        const date = localDateStr(d)
+        const candidates = normalizeAiTasks(item.tasks) || buildDefaultPlan(date).tasks
+        const fitted = fitPlanTasks(candidates, { remainingMinutes: calendarDayInfo(date).maxMinutes, reviewRatio: item.review_ratio === 1 ? 1 : 1.5 })
         days.push({
-          date: item.date || localDateStr(d),
-          title: typeof item.title === 'string' ? item.title : `第 ${i + 1} 天`,
-          detail: typeof item.detail === 'string' ? item.detail : ''
+          date,
+          title: fitted.tasks.map(t => t.title).join(' · ') || '休息或归纳日',
+          detail: fitted.tasks.map(t => `${t.title}约${t.minutes}分钟：${t.detail}`).join('\n') + (fitted.warnings.length ? '\n' + fitted.warnings.join(' ') : '')
         })
       }
     }
@@ -654,30 +756,35 @@ ${stats.byLevel1.length ? stats.byLevel1.join('\n') : '（无）'}（共 ${stats
   }
 }
 
-/** 手动让 AI 重新调整今天的计划（失败则保留现有计划） */
-export async function regenerateTodayPlan(): Promise<{ success: boolean; plan: DailyPlan; error?: string }> {
+/** 用户只需说一句情况；只调整未完成任务，失败不覆盖任务单。 */
+const adjustingDates = new Set<string>()
+export async function regenerateTodayPlan(input: PlanAdjustmentInput = {}): Promise<{ success: boolean; plan: DailyPlan; error?: string }> {
   const today = localDateStr()
-  const prev = loadPlan(today) || loadPreviousPlan(today)
+  const existing = loadPlan(today) || await ensureTodayPlan()
+  if (adjustingDates.has(today)) return { success: false, plan: existing, error: '正在调整今天的计划，请稍等' }
+  adjustingDates.add(today)
+  const feedback = typeof input.feedback === 'string' ? input.feedback.trim().slice(0, 2000) : ''
   try {
-    const adjusted = prev ? await adjustWithAi(prev, today) : null
-    if (adjusted) {
+    const adjusted = await adjustWithAi(existing, today, { feedback })
+    const current = loadPlan(today) || existing
+    if (current.updated_at !== existing.updated_at) return { success: false, plan: current, error: '调整期间完成记录发生了变化，已保留最新记录，请重新调整' }
+    if (!adjusted) return { success: false, plan: current, error: 'AI 调整失败，当前任务和已完成记录保持不变，请稍后重试' }
+    if (feedback) adjusted.plan.note = [current.note, '计划更正：' + feedback].filter(Boolean).join('\n')
+    getDb().transaction(() => {
       insertPlan(adjusted.plan)
-      return { success: true, plan: adjusted.plan }
-    }
-    // AI 失败：保留现有计划，标记说明
-    const existing = loadPlan(today)
-    if (existing) {
-      existing.adjustment_reason = existing.adjustment_reason || 'AI 调整失败，沿用当前计划'
-      existing.updated_at = new Date().toISOString()
-      insertPlan(existing)
-      return { success: false, plan: existing, error: 'AI 调整失败（未配置 API Key 或网络异常），沿用当前计划' }
-    }
-    const fallback = carryOverUnfinished(prev, buildDefaultPlan(today))
-    insertPlan(fallback)
-    return { success: false, plan: fallback, error: 'AI 调整失败，已使用默认计划' }
+      writeConfig('plan_future_note', adjusted.futureNote)
+      // 只保存明确具有长期含义的原话，不让模型把“今天累”变成永久习惯。
+      if (feedback && /以后|今后|每次|习惯|长期|默认|每天|一直/.test(feedback)) {
+        let corrections: string[] = []
+        try { corrections = JSON.parse(readConfig('plan_user_corrections') || '[]') } catch { /* 旧记录无效时重建 */ }
+        if (!Array.isArray(corrections)) corrections = []
+        writeConfig('plan_user_corrections', JSON.stringify([...corrections.filter(t => typeof t === 'string' && t !== feedback), feedback].slice(-5)))
+      }
+      // 旧的周安排可能与本次更正冲突；不在后台偷偷再调用 AI。
+      writeConfig('plan_forward_plan', '')
+    })()
+    return { success: true, plan: adjusted.plan }
   } catch (err: any) {
-    const existing = loadPlan(today) || carryOverUnfinished(prev, buildDefaultPlan(today))
-    insertPlan(existing)
-    return { success: false, plan: existing, error: `AI 调整失败: ${err.message}` }
-  }
+    return { success: false, plan: loadPlan(today) || existing, error: `AI 调整失败：${err.message}，当前记录未被覆盖` }
+  } finally { adjustingDates.delete(today) }
 }

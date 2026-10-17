@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Typography, Table, Select, Input, Space, Tag, Button, Modal, Tooltip, Switch, App } from 'antd'
-import { SearchOutlined, ExportOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons'
+import { SearchOutlined, ExportOutlined, DeleteOutlined, ReloadOutlined } from '@/components/study-icons'
 import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
 import { PageHeader } from '@/components/page-header'

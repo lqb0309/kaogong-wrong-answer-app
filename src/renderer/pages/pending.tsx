@@ -1,24 +1,20 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Typography, Button, Space, Tag, Input, Empty, App, Modal, Select, Popconfirm, Tooltip, Radio, Alert, Card, Row, Col, Switch, Image } from 'antd'
-import {
-  CheckOutlined, StepForwardOutlined, ThunderboltOutlined,
-  LeftOutlined, RightOutlined, PlusOutlined,
-  PictureOutlined, EditOutlined, TagsOutlined, AppstoreOutlined, FileTextOutlined, BookOutlined,
-  ReadOutlined
-} from '@ant-design/icons'
-import { usePendingStore } from '@/stores/pending'
+import { Typography, Button, Space, Tag, Input, Empty, App, Modal, Select, Popconfirm, Tooltip, Radio, Alert, Card, Switch, Image, Tabs } from 'antd'
+import { StepForwardOutlined } from '@ant-design/icons'
+import { CheckOutlined, LeftOutlined, RightOutlined, PlusOutlined, PictureOutlined, EditOutlined, TagsOutlined, AppstoreOutlined, FileTextOutlined, BookOutlined, ReadOutlined } from '@/components/study-icons'
+import { usePendingStore, flushPendingDraft } from '@/stores/pending'
 import { useSettingsStore } from '@/stores/settings'
 import { CategoryTreeSelect } from '@/components/category-tree-select'
 import { CanvasCrop } from '@/components/canvas-crop'
 import { useTagTreeStore } from '@/stores/tag-tree'
 import { PageHeader } from '@/components/page-header'
+import { MarkdownRenderer } from '@/components/markdown-renderer'
+import { QuestionTextFallback } from '@/components/question-text-fallback'
+import { AnswerSummary } from '@/components/answer-summary'
+import { ReadingSplit } from '@/components/reading-split'
+import { SafeImage } from '@/components/safe-image'
 import dayjs from 'dayjs'
-
-// 图片加载失败占位图
-const IMG_FALLBACK = 'data:image/svg+xml;utf8,' + encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><rect width="120" height="120" fill="#f5f5f5"/><text x="60" y="62" font-size="12" text-anchor="middle" fill="#bbb">图片加载失败</text></svg>'
-)
 
 // 右侧信息区的分区标题
 function SectionLabel({ icon, children }: { icon?: React.ReactNode; children: React.ReactNode }) {
@@ -41,14 +37,42 @@ export function PendingPage() {
   const [unknownActionItem, setUnknownActionItem] = useState<string | null>(null)
   const [newTagInput, setNewTagInput] = useState('')
   const [confirmLoading, setConfirmLoading] = useState(false)
+  const savingRef = useRef(false)
   const [errorTypes, setErrorTypes] = useState<string[]>([])
   const [cropOpen, setCropOpen] = useState(false)
   const [cropImagePath, setCropImagePath] = useState('')
   const [hasGraphics, setHasGraphics] = useState(false)
   const [graphicImagePath, setGraphicImagePath] = useState('')
   const [autoPlay, setAutoPlay] = useState(false)
+  const [reflectionEditing, setReflectionEditing] = useState(false)
+  const [infoOpen, setInfoOpen] = useState(false)
   const [sessionStats, setSessionStats] = useState({ confirmed: 0, skipped: 0 })
+  const [previewTextRatio, setPreviewTextRatio] = useState(75)
   const hydratedRef = useRef(false)
+  const previewStageRef = useRef<HTMLDivElement>(null)
+
+  const startPreviewResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const stage = previewStageRef.current
+    if (!stage) return
+
+    const resize = (pointerEvent: PointerEvent) => {
+      const rect = stage.getBoundingClientRect()
+      const ratio = ((pointerEvent.clientY - rect.top) / rect.height) * 100
+      setPreviewTextRatio(Math.min(85, Math.max(30, ratio)))
+    }
+    const stop = () => {
+      window.removeEventListener('pointermove', resize)
+      window.removeEventListener('pointerup', stop)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('pointermove', resize)
+    window.addEventListener('pointerup', stop)
+  }, [])
 
   useEffect(() => { if (!tree.length) loadTree() }, [tree.length, loadTree])
   useEffect(() => { window.api.getErrorTypes().then(setErrorTypes) }, [])
@@ -70,7 +94,8 @@ export function PendingPage() {
           ocrText: q.ocr_text || '',
           reasoning: q.reasoning || '',
           matchType: q.match_type || 'unknown',
-          errorCount: q.error_count || 1,
+          errorCount: q.error_count ?? 1,
+          warning: q.analysis_error ? `复盘分析失败：${q.analysis_error}，可进入专注复盘重新生成。` : undefined,
           source: q.source || '',
           reflection: q.reflection || '',
           errorType: q.error_type || '',
@@ -80,6 +105,15 @@ export function PendingPage() {
           aiRawLevel3: q.ai_raw_level3 || q.level3,
           hasGraphics: !!q.has_graphics,
           graphicImagePath: q.graphic_image_path || ''
+          ,groupId: q.group_id || ''
+          ,questionNumber: q.question_number || ''
+          ,materialImages: (() => { try { return JSON.parse(q.material_image_ids || '[]') } catch { return [] } })()
+          ,groupTitle: q.group_title || ''
+          ,materialText: q.group_passage_text || ''
+          ,questionImages: (() => { try { return JSON.parse(q.question_images || '[]') } catch { return [] } })()
+          ,optionImages: (() => { try { return JSON.parse(q.option_images || '{}') } catch { return {} } })()
+          ,originalAnswer: (() => { try { return JSON.parse(q.original_answer || '{}') } catch { return {} } })()
+          ,officialAnalysis: q.original_analysis || ''
         }))
         if (items.length > 0) {
           addItems(items)
@@ -97,71 +131,90 @@ export function PendingPage() {
   }, [currentIndex, queue])
 
   const current = queue[currentIndex]
+  useEffect(() => { setReflectionEditing(false) }, [current?.id])
   const threshold = Number(getSetting('confidence_threshold', '0.7'))
   const isLowConfidence = current && current.confidence < threshold
   const canGoPrev = currentIndex > 0
   const canGoNext = currentIndex < queue.length - 1
+  const previewImages = [...(current?.materialImages || []), ...(current?.questionImages || [])].filter(Boolean)
+  const visiblePreviewImages = previewImages.length > 0 ? previewImages : (!current?.groupId && current?.imageUrl ? [current.imageUrl] : [])
+
+  const savePendingItem = useCallback(async (item: typeof current, graphics?: { hasGraphics: boolean; graphicImagePath: string }) => {
+    if (!item) return false
+    await flushPendingDraft(item.id)
+    const result = await window.api.writeToObsidian({
+      ...item,
+      imageUrl: item.imageUrl,
+      hasGraphics: graphics?.hasGraphics ?? item.hasGraphics ?? false,
+      graphicImagePath: graphics?.graphicImagePath ?? item.graphicImagePath ?? '',
+      status: 'confirmed',
+      fileName: `${dayjs().format('YYYYMMDD-HHmmss')}.md`
+    })
+    return !!result?.success
+  }, [])
 
   const handleConfirm = useCallback(async () => {
-    if (!current) return
+    if (!current || savingRef.current) return
+    savingRef.current = true
     const isLast = queue.length === 1
     setConfirmLoading(true)
     try {
-      const timestamp = dayjs().format('YYYYMMDD-HHmmss')
-      const fileName = `${timestamp}.md`
-
-      const questionData = {
-        id: current.id,
-        imageUrl: current.imageUrl,
-        level1: current.level1,
-        level2: current.level2,
-        level3: current.level3,
-        confidence: current.confidence,
-        ocrText: current.ocrText,
-        reasoning: current.reasoning,
-        errorCount: current.errorCount,
-        source: current.source,
-        reflection: current.reflection,
-        errorType: current.errorType,
-        traceId: current.traceId,
-        hasGraphics: hasGraphics,
-        graphicImagePath: graphicImagePath,
-        status: 'confirmed',
-        fileName
-      }
-
-      const result = await window.api.writeToObsidian(questionData)
-      if (result.success) {
-        message.success(result.vaultWrite ? '已写入 Obsidian' : '已入库（Vault 写入失败，将自动重试）')
+      const success = await savePendingItem(current, { hasGraphics, graphicImagePath })
+      if (success) {
+        message.success('已入库；Vault 不可用时会自动补写')
+        setSessionStats((s) => ({ ...s, confirmed: s.confirmed + 1 }))
+        removeItem(current.id)
+        if (isLast) {
+          Modal.confirm({ title: '今日错题已全部确认', content: '是否现在生成今日知识点归纳？', okText: '去归纳', cancelText: '稍后', onOk: () => navigate('/knowledge') })
+        }
       } else {
-        message.warning('入库失败，将自动重试')
+        message.warning('入库失败，本题已保留，请重试')
       }
     } catch (err: any) {
       message.error(`入库失败: ${err.message}`)
     } finally {
       setConfirmLoading(false)
-      setSessionStats((s) => ({ ...s, confirmed: s.confirmed + 1 }))
-      removeItem(current.id)
-      // 最后一题确认完成 → 流程接力：提示生成今日知识点归纳
-      if (isLast) {
-        Modal.confirm({
-          title: '今日错题已全部确认 🎉',
-          content: `本次共确认 ${sessionStats.confirmed + 1} 道错题，是否现在生成「今日知识点归纳」？`,
-          okText: '去归纳',
-          cancelText: '稍后',
-          onOk: () => navigate('/knowledge')
-        })
-      }
+      savingRef.current = false
     }
-  }, [current, queue.length, hasGraphics, graphicImagePath, message, removeItem, sessionStats.confirmed, navigate])
+  }, [current, queue.length, hasGraphics, graphicImagePath, message, removeItem, sessionStats.confirmed, navigate, savePendingItem])
 
-  const handleSkip = useCallback(() => {
-    if (!current) return
-    // 跳过 → 状态回退为待分类，回到错题处理可重新分类或再次送入待确认
-    window.api.updateQuestionStatus(current.id, 'pending').catch(() => {})
-    setSessionStats((s) => ({ ...s, skipped: s.skipped + 1 }))
-    removeItem(current.id)
-  }, [current, removeItem])
+  const handleConfirmGroup = useCallback(() => {
+    if (!current?.groupId) return
+    const groupItems = queue.filter(item => item.groupId === current.groupId)
+    Modal.confirm({
+      title: `确认本组 ${groupItems.length} 道错题？`,
+      content: '公共资料只保存一次，每道小题仍会独立记录答案、标签和复盘。',
+      okText: '确认本组',
+      cancelText: '逐题检查',
+      onOk: async () => {
+        if (savingRef.current) return
+        savingRef.current = true
+        setConfirmLoading(true)
+        const succeeded: string[] = []
+        for (const item of groupItems) {
+          try { if (await savePendingItem(item)) succeeded.push(item.id) } catch { /* failed item remains */ }
+        }
+        succeeded.forEach(removeItem)
+        setSessionStats(stats => ({ ...stats, confirmed: stats.confirmed + succeeded.length }))
+        if (succeeded.length === groupItems.length) message.success(`本组 ${succeeded.length} 道题已入库`)
+        else message.warning(`已入库 ${succeeded.length} 道，${groupItems.length - succeeded.length} 道失败并保留`)
+        setConfirmLoading(false)
+        savingRef.current = false
+      }
+    })
+  }, [current, queue, removeItem, savePendingItem, message])
+
+  const handleSkip = useCallback(async () => {
+    if (!current || savingRef.current) return
+    savingRef.current = true
+    try {
+      await flushPendingDraft(current.id)
+      await window.api.updateQuestionStatus(current.id, 'pending')
+      setSessionStats(s => ({ ...s, skipped: s.skipped + 1 }))
+      removeItem(current.id)
+    } catch (error: any) { message.error(`跳过失败，本题已保留：${error.message}`) }
+    finally { savingRef.current = false }
+  }, [current, removeItem, message])
 
   // Keyboard shortcuts（自动播放模式下，单独按 Enter 即可确认下一题；输入框内不触发，避免误确认）
   useEffect(() => {
@@ -186,6 +239,9 @@ export function PendingPage() {
       okText: '全部入库',
       cancelText: '取消',
       onOk: async () => {
+        if (savingRef.current) return
+        savingRef.current = true
+        setConfirmLoading(true)
         const fastErrorCount = Number(getSetting('fast_induct_error_count', '1')) || 1
         const succeeded: string[] = []
         const failed: string[] = []
@@ -193,10 +249,12 @@ export function PendingPage() {
           try {
             const timestamp = dayjs().format('YYYYMMDD-HHmmss')
             const fileName = `${timestamp}.md`
+            await flushPendingDraft(item.id)
             const r = await window.api.writeToObsidian({
               ...item,
               imageUrl: item.imageUrl,
-              errorCount: fastErrorCount,
+              errorCount: item.errorType === '正确但超时' ? 0 : fastErrorCount,
+              status: 'confirmed',
               source: item.source || '',
               hasGraphics: item.hasGraphics || false,
               graphicImagePath: item.graphicImagePath || '',
@@ -215,6 +273,8 @@ export function PendingPage() {
         }
         // 只移除成功的，失败的保留在队列中可单独处理
         succeeded.forEach((id) => removeItem(id))
+        setConfirmLoading(false)
+        savingRef.current = false
       }
     })
   }, [queue, message, removeItem])
@@ -296,7 +356,7 @@ export function PendingPage() {
   }
 
   return (
-    <div>
+    <div className="pending-page">
       <PageHeader
         title={<span>待确认 <Typography.Text type="secondary" style={{ fontSize: 15, fontWeight: 400 }}>{currentIndex + 1} / {queue.length}</Typography.Text></span>}
         subtitle={`← → 切换 · ${autoPlay ? 'Enter' : '⌘Enter'} 确认 · ⌘S 跳过 · 已确认 ${sessionStats.confirmed} / 跳过 ${sessionStats.skipped}`}
@@ -310,30 +370,81 @@ export function PendingPage() {
             </Space>
             <Button icon={<ReadOutlined />} onClick={() => navigate('/pending/review')}>专注复盘</Button>
             <Popconfirm title={`将队列中所有 ${queue.length} 张错题以 AI 建议标签直接入库？`} onConfirm={handleBatchConfirm} okText="全部入库" cancelText="取消">
-              <Button icon={<ThunderboltOutlined />} disabled={queue.length === 0}>全部快速入库</Button>
+              <Button icon={<CheckOutlined />} disabled={queue.length === 0}>全部快速入库</Button>
             </Popconfirm>
           </Space>
         }
       />
 
-      <Row gutter={[18, 18]} className="pending-workspace">
-        {/* Left: Image + queue strip */}
-        <Col xs={24} xl={10} className="pending-preview-column">
+      <ReadingSplit storageKey="pending-reading-layout">
+        {/* Left: text first, optional images below, then queue strip */}
+        <section className="pending-preview-column" aria-label="题目阅读">
           <Card
             size="small"
             className="pending-preview-card"
-            title={<span><PictureOutlined style={{ color: '#1677ff' }} /> 题目图片</span>}
+            title={<span><PictureOutlined style={{ color: '#1677ff' }} /> {current.groupId
+              ? `${current.groupTitle || '资料题组公共材料'} · 第 ${current.questionNumber || '?'} 题 / 共 ${queue.filter(q => q.groupId === current.groupId).length} 题`
+              : '题目内容'}</span>}
             extra={isLowConfidence && <Tag color="orange">低置信度 {Math.round(current.confidence * 100)}%</Tag>}
             style={{ border: isLowConfidence ? '1px solid #faad14' : undefined }}
           >
-            <div className="pending-image-stage">
-              <Image
-                src={current.imageUrl}
-                alt="错题截图"
-                onError={(e) => { (e.target as HTMLImageElement).src = IMG_FALLBACK }}
-                preview={{ mask: '点击放大' }}
-                style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: 6, cursor: 'zoom-in' }}
-              />
+            <div
+              ref={previewStageRef}
+              className={`pending-image-stage${visiblePreviewImages.length > 0 || Object.keys(current.optionImages || {}).length > 0 ? ' has-images' : ''}`}
+              style={{ '--pending-text-ratio': `${previewTextRatio}%` } as React.CSSProperties}
+            >
+              <div className="pending-question-text">
+                {current.groupId && current.materialText && (
+                <div className="pending-material-text">
+                  <div className="question-text-fallback-label">公共资料</div>
+                  <MarkdownRenderer content={current.materialText} />
+                </div>
+                )}
+                {current.ocrText && <QuestionTextFallback content={current.ocrText} label="题目与选项" />}
+                <AnswerSummary answer={current.originalAnswer} />
+                {!current.materialText && !current.ocrText && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无文字题目" />}
+              </div>
+
+              {(visiblePreviewImages.length > 0 || Object.keys(current.optionImages || {}).length > 0) && (
+                <>
+                <div
+                  className="pending-preview-resizer"
+                  role="separator"
+                  aria-label="拖动调整题目与图片高度"
+                  aria-orientation="horizontal"
+                  tabIndex={0}
+                  aria-valuemin={30} aria-valuemax={85} aria-valuenow={previewTextRatio}
+                  onKeyDown={event => {
+                    if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+                      event.preventDefault()
+                      setPreviewTextRatio(ratio => event.key === 'Home' ? 30 : event.key === 'End' ? 85 : Math.min(85, Math.max(30, ratio + (event.key === 'ArrowUp' ? -5 : 5))))
+                    }
+                  }}
+                  onPointerDown={startPreviewResize}
+                ><span /></div>
+                <div className="pending-question-images">
+                  <Typography.Text strong><PictureOutlined /> 题目图片</Typography.Text>
+                  <Image.PreviewGroup>
+                    <div className="pending-question-image-grid">
+                      {visiblePreviewImages.map((imageUrl, imageIndex) => (
+                        <SafeImage
+                          key={`${imageUrl}-${imageIndex}`}
+                          src={imageUrl}
+                          alt={`题目图片 ${imageIndex + 1}`}
+                          preview={{ mask: '点击放大' }}
+                          style={{ maxWidth: '100%', maxHeight: '100%', width: 'auto', height: 'auto', objectFit: 'contain', borderRadius: 6, cursor: 'zoom-in' }}
+                        />
+                      ))}
+                      {Object.entries(current.optionImages || {}).flatMap(([key, images]) => images.map((src, index) => (
+                        <div key={`${key}-${index}`} style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 8 }}>
+                          <Tag color="blue">选项 {key}</Tag><SafeImage src={src} style={{ maxWidth: '100%', maxHeight: 180, width: 'auto', height: 'auto', objectFit: 'contain' }} preview={{ mask: '点击放大' }} />
+                        </div>
+                      )))}
+                    </div>
+                  </Image.PreviewGroup>
+                </div>
+                </>
+              )}
               <div className="pending-image-navigation">
                 <Button size="small" icon={<LeftOutlined />} disabled={!canGoPrev} onClick={() => setCurrentIndex(currentIndex - 1)} />
                 <span>{currentIndex + 1} / {queue.length}</span>
@@ -351,31 +462,40 @@ export function PendingPage() {
               <div className="pending-thumbnail-strip">
                 {queue.map((q, i) => (
                   <Tooltip key={q.id} title={`第 ${i + 1} 题${i === currentIndex ? '（当前）' : ''}`}>
-                    <div onClick={() => setCurrentIndex(i)} style={{
+                    <button type="button" aria-label={`查看第 ${i + 1} 题`} aria-current={i === currentIndex ? 'true' : undefined} onClick={() => setCurrentIndex(i)} style={{
                       width: 54, height: 54, borderRadius: 6, overflow: 'hidden', flexShrink: 0, cursor: 'pointer',
                       border: i === currentIndex ? '2px solid #1677ff' : '2px solid transparent',
                       opacity: i === currentIndex ? 1 : 0.55,
                       background: '#f5f5f5', boxShadow: i === currentIndex ? '0 0 0 2px rgba(22,119,255,0.2)' : undefined
                     }}>
-                      <img src={q.imageUrl} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt={`第${i + 1}题`}
-                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
-                    </div>
+                      {current.groupId && q.groupId === current.groupId ? (
+                        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 600, color: i === currentIndex ? '#1677ff' : '#666' }}>
+                          第 {q.questionNumber || i + 1} 题
+                        </div>
+                      ) : (
+                        q.imageUrl ? <SafeImage src={q.imageUrl} width="100%" height="100%" preview={false} style={{ objectFit: 'cover' }} alt={`第${i + 1}题`} />
+                          : <span>第 {q.questionNumber || i + 1} 题</span>
+                      )}
+                    </button>
                   </Tooltip>
                 ))}
               </div>
             )}
 
           </Card>
-        </Col>
+        </section>
 
         {/* Right: Info & Actions */}
-        <Col xs={24} xl={14} className="pending-form-column">
+        <section className="pending-form-column" aria-label="复盘阅读">
           <Card
             size="small"
-            title="确认信息"
+            title={<span><BookOutlined style={{ color: '#fa8c16' }} /> 个人复盘</span>}
+            extra={<Button size="small" icon={<FileTextOutlined />} onClick={() => setInfoOpen(true)}>题目信息</Button>}
             className="pending-form-card"
           >
             <div className="pending-form-content">
+              <Modal title="题目信息与分类" open={infoOpen} onCancel={() => setInfoOpen(false)} footer={null} width={860}>
+              <div className="pending-confirmation-summary pending-confirmation-dialog">
               {/* Classification warning */}
               {current.warning && (
                 <Alert type="warning" showIcon message="分类异常" description={current.warning} />
@@ -537,21 +657,36 @@ export function PendingPage() {
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}><strong>AI 分析：</strong>{current.reasoning}</Typography.Text>
                 </div>
               )}
+              </div>
+              </Modal>
 
               {/* 复盘思路 */}
               <div className="pending-section pending-reflection">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <SectionLabel icon={<BookOutlined style={{ color: '#fa8c16' }} />}>复盘思路</SectionLabel>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>核对解题路径和易错点，确认无误后入库</Typography.Text>
+                  <Button size="small" type="text" icon={<EditOutlined />} onClick={() => setReflectionEditing(value => !value)}>
+                    {reflectionEditing ? '完成编辑' : '编辑'}
+                  </Button>
                 </div>
-                <Input.TextArea className="pending-reflection-input" rows={3}
-                  placeholder="复盘思路会在识别时自动生成，也可以在这里手动修改..."
-                  value={current.reflection || ''}
-                  onChange={(e) => updateItem(current.id, { reflection: e.target.value })} />
+                {reflectionEditing ? (
+                  <Input.TextArea className="pending-reflection-input"
+                    placeholder="复盘思路会在识别时自动生成，也可以在这里手动修改..."
+                    value={current.reflection || ''}
+                    onChange={(e) => updateItem(current.id, { reflection: e.target.value })} />
+                ) : (
+                  <Tabs key={current.id} className="reading-tabs" defaultActiveKey="review" items={[
+                    { key: 'review', label: '个人复盘', children: <div className="pending-reflection-reader">
+                      {current.reflection?.trim() ? <MarkdownRenderer content={current.reflection} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无复盘，可点击编辑补充" />}
+                    </div> },
+                    ...(current.officialAnalysis ? [{ key: 'source', label: '粉笔解析', children: <div className="pending-reflection-reader"><MarkdownRenderer content={current.officialAnalysis} /></div> }] : [])
+                  ]} />
+                )}
               </div>
 
               {/* Action buttons */}
               <div className="pending-action-bar">
                 <Button onClick={handleSkip} icon={<StepForwardOutlined />} disabled={confirmLoading}>跳过</Button>
+                {current.groupId && <Button onClick={handleConfirmGroup} disabled={confirmLoading}>确认本组</Button>}
                 <Button
                   type="primary"
                   icon={<CheckOutlined />}
@@ -565,8 +700,8 @@ export function PendingPage() {
               </div>
             </div>
           </Card>
-        </Col>
-      </Row>
+        </section>
+      </ReadingSplit>
 
       {/* Crop dialog for graphics */}
       <CanvasCrop

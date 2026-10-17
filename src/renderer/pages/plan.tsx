@@ -1,6 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { App, Alert, Button, Card, Checkbox, Input, List, Popconfirm, Progress, Radio, Space, Spin, Steps, Tag, Typography, Tooltip } from 'antd'
-import { ReloadOutlined, ThunderboltOutlined, CalendarOutlined, CheckCircleOutlined, ClockCircleOutlined, MinusCircleOutlined, RocketOutlined, ScheduleOutlined, EditOutlined } from '@ant-design/icons'
+import { App, Alert, Button, Card, Checkbox, DatePicker, Input, List, Modal, Popconfirm, Progress, Space, Spin, Steps, Switch, Tag, Typography, Tooltip } from 'antd'
+import { CheckCircleOutlined, MinusCircleOutlined, RocketOutlined } from '@ant-design/icons'
+import { ReloadOutlined, AiSparkOutlined, TimerOutlined, CalendarOutlined, ClockCircleOutlined, ScheduleOutlined, EditOutlined, SyncOutlined, ExportOutlined } from '@/components/study-icons'
+import { useNavigate } from 'react-router-dom'
+import dayjs from 'dayjs'
+import { PageHeader } from '@/components/page-header'
 
 const { Title, Text } = Typography
 
@@ -69,6 +73,7 @@ const STATUS_META: Record<string, { text: string; color: string; icon: React.Rea
 }
 
 export function PlanPage() {
+  const navigate = useNavigate()
   const { message } = App.useApp()
   const [loading, setLoading] = useState(true)
   const [plan, setPlan] = useState<TodayPlan | null>(null)
@@ -80,11 +85,14 @@ export function PlanPage() {
   const [forwardPlan, setForwardPlan] = useState<ForwardPlan | null>(null)
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [editingExam, setEditingExam] = useState(false)
-  const [feedbackStatus, setFeedbackStatus] = useState<'pending' | 'partial' | 'completed'>('pending')
-  const [feedbackNote, setFeedbackNote] = useState('')
-  const [savingFeedback, setSavingFeedback] = useState(false)
   const [regenerating, setRegenerating] = useState(false)
+  const [planCorrection, setPlanCorrection] = useState('')
   const [forwardLoading, setForwardLoading] = useState(false)
+  const [fenbiSummary, setFenbiSummary] = useState<any>(null)
+  const [fenbiSyncing, setFenbiSyncing] = useState(false)
+  const [fenbiWrongModalOpen, setFenbiWrongModalOpen] = useState(false)
+  const [fenbiWrongRange, setFenbiWrongRange] = useState<any>([dayjs(), dayjs()])
+  const [includeCorrectOvertime, setIncludeCorrectOvertime] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -92,8 +100,6 @@ export function PlanPage() {
       const res = await window.api.getTodayPlan()
       if (res.success && res.plan) {
         setPlan(res.plan)
-        setFeedbackStatus(res.plan.status)
-        setFeedbackNote(res.plan.note || '')
       } else {
         message.error(res.error || '获取今日计划失败')
       }
@@ -105,6 +111,7 @@ export function PlanPage() {
       setForwardPlan(res.forward_plan || null)
       const h = await window.api.getPlanHistory(7)
       setHistory(h || [])
+      setFenbiSummary(await window.api.getFenbiTodaySummary())
     } catch (err: any) {
       message.error(`获取计划失败: ${err.message}`)
     } finally {
@@ -128,21 +135,6 @@ export function PlanPage() {
     }
   }
 
-  const saveFeedback = async () => {
-    if (!plan) return
-    setSavingFeedback(true)
-    try {
-      const res = await window.api.submitPlanFeedback(plan.date, feedbackStatus, feedbackNote)
-      if (res.success && res.plan) {
-        setPlan(res.plan)
-        message.success('今日反馈已保存，明天的计划会参考它调整')
-      }
-    } catch (err: any) {
-      message.error(`保存失败: ${err.message}`)
-    } finally {
-      setSavingFeedback(false)
-    }
-  }
 
   const saveExamDate = async () => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(examDate)) {
@@ -168,13 +160,17 @@ export function PlanPage() {
   const regenerate = async () => {
     setRegenerating(true)
     try {
-      const res = await window.api.regenerateTodayPlan()
+      const res = await window.api.regenerateTodayPlan({ feedback: planCorrection.trim() })
       if (res.plan) {
         setPlan(res.plan)
-        setFeedbackStatus(res.plan.status)
-        setFeedbackNote(res.plan.note || '')
       }
-      if (res.success) message.success('AI 已重新调整今天的计划')
+      if (res.success) {
+        setPlanCorrection('')
+        setForwardPlan(null)
+        const config = await window.api.getAllConfig()
+        setFutureNote(config.plan_future_note || '')
+        message.success('已调整未完成任务，已完成记录保持不变')
+      }
       else message.warning(res.error || 'AI 调整未生效，沿用当前计划')
       const h = await window.api.getPlanHistory(7)
       setHistory(h || [])
@@ -202,26 +198,51 @@ export function PlanPage() {
     }
   }
 
+  const syncFenbi = async (currentOnly = false) => {
+    setFenbiSyncing(true)
+    try {
+      const result = currentOnly ? await window.api.syncFenbiCurrentReport() : await window.api.syncFenbiToday()
+      setFenbiSummary({ ...result, accuracy: result.questions ? Math.round(result.correct / result.questions * 100) : 0 })
+      message.success(`已同步 ${result.questions} 题${!currentOnly && 'scannedReports' in result ? `（扫描 ${result.scannedReports} 份报告）` : ''}${result.completedTasks.length ? `，自动完成 ${result.completedTasks.length} 项任务` : ''}`)
+      await load()
+    } catch (error: any) {
+      message.warning(error.message || '同步失败，请先在粉笔窗口打开今天完成的练习报告')
+    } finally { setFenbiSyncing(false) }
+  }
+
+  const syncFenbiWrong = async () => {
+    if (!fenbiWrongRange?.[0] || !fenbiWrongRange?.[1]) return message.warning('请选择同步日期')
+    setFenbiSyncing(true)
+    try {
+      const result = await window.api.syncFenbiWrongQuestions({
+        startDate: fenbiWrongRange[0].format('YYYY-MM-DD'),
+        endDate: fenbiWrongRange[1].format('YYYY-MM-DD'),
+        includeCorrectOvertime
+      })
+      setFenbiWrongModalOpen(false)
+      message.success(`扫描 ${result.scannedReports} 份练习，已保存 ${result.imported} 道题并转入后台 AI 分析${result.skipped ? `，跳过 ${result.skipped} 道重复题` : ''}；完成后会通知你确认`)
+      await load()
+    } catch (error: any) {
+      message.warning(error.message || '粉笔错题同步失败')
+    } finally { setFenbiSyncing(false) }
+  }
+
   const doneCount = plan?.tasks.filter(t => t.done).length || 0
   const totalTasks = plan?.tasks.length || 0
-  const percent = totalTasks > 0 ? Math.round(doneCount / totalTasks * 100) : 0
+  const totalMinutes = plan?.tasks.reduce((n, t) => n + t.minutes, 0) || 0
+  const completedMinutes = plan?.tasks.filter(t => t.done).reduce((n, t) => n + t.minutes, 0) || 0
+  const percent = totalMinutes > 0 ? Math.round(completedMinutes / totalMinutes * 100) : 0
 
   return (
-    <div style={{ maxWidth: 880, margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
-        <Title level={4} style={{ margin: 0 }}>
-          <CalendarOutlined style={{ marginRight: 8, color: '#1677ff' }} />
-          今日计划 · {plan?.date || '加载中'}
-        </Title>
-        <Space>
+    <div className="plan-page">
+      <PageHeader title="每日计划" subtitle={`${plan?.date || '加载中'}，今天只专注值得完成的事`} extra={<Space>
           <Tag icon={<RocketOutlined />} color={daysUntil <= 60 ? 'red' : 'orange'} style={{ fontSize: 13, padding: '4px 10px' }}>
             距国考约 {daysUntil} 天（{examDate}）
           </Tag>
           <Tooltip title="刷新">
-            <Button size="small" icon={<ReloadOutlined />} onClick={load} />
+            <Button size="small" aria-label="刷新每日计划" title="刷新每日计划" icon={<ReloadOutlined />} onClick={load} />
           </Tooltip>
-        </Space>
-      </div>
+        </Space>} />
 
       {loading ? (
         <Card>
@@ -235,9 +256,43 @@ export function PlanPage() {
           <Alert type="warning" showIcon message="今日计划生成失败" description="请检查 AI 配置或稍后重试。" action={<Button size="small" onClick={load}>重试</Button>} />
         </Card>
       ) : (
-        <>
+        <div className="plan-grid">
+          <Card className="plan-sync-card" title={<Space><SyncOutlined style={{ color: '#1677ff' }} />今日粉笔学习记录</Space>} extra={<Space wrap><Button size="small" icon={<ExportOutlined />} onClick={() => window.api.openFenbiImporter()}>打开粉笔</Button><Button size="small" onClick={() => syncFenbi(true)} disabled={fenbiSyncing}>同步当前报告</Button><Button size="small" icon={<SyncOutlined />} onClick={() => setFenbiWrongModalOpen(true)} disabled={fenbiSyncing}>同步错题</Button><Button size="small" type="primary" icon={<SyncOutlined />} loading={fenbiSyncing} onClick={() => syncFenbi(false)}>同步今日记录</Button></Space>}>
+            {fenbiSummary ? <>
+              <Space wrap size={[8, 8]}>
+                <Tag color="blue">{fenbiSummary.sessions} 份练习</Tag><Tag>{fenbiSummary.questions} 题</Tag><Tag color="success">正确率 {fenbiSummary.accuracy}%</Tag><Tag color="error">错题 {fenbiSummary.wrong}</Tag><Tag color="orange">超时 {fenbiSummary.overtime}</Tag><Tag>用时 {Math.floor(fenbiSummary.totalSeconds / 60)} 分钟</Tag>
+              </Space>
+              <div style={{ marginTop: 10, lineHeight: 1.8 }}>{fenbiSummary.summary || `今天已同步 ${fenbiSummary.questions} 题，正确率 ${fenbiSummary.accuracy}%。`}</div>
+              {!!fenbiSummary.modules?.length && <div style={{ marginTop: 8 }}>{fenbiSummary.modules.map((item: any) => <Tag key={item.name}>{item.name} {item.count} 题 · {item.count ? Math.round(item.correct / item.count * 100) : 0}%</Tag>)}</div>}
+              <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>上次同步：{fenbiSummary.syncedAt ? new Date(fenbiSummary.syncedAt).toLocaleTimeString() : '-'}</Text>
+            </> : <Alert type="info" showIcon message="今天还没有同步粉笔练习" description="点击“自动同步今天”，程序会在粉笔练习历史中筛选今天且已完成的记录，逐份读取并汇总。若粉笔页面结构临时变化，可打开某份报告后使用“同步当前报告”备用。" />}
+          </Card>
+          <Modal title="从粉笔同步错题" open={fenbiWrongModalOpen} onCancel={() => setFenbiWrongModalOpen(false)} onOk={syncFenbiWrong} okText="开始同步" cancelText="取消" confirmLoading={fenbiSyncing} destroyOnClose={false}>
+            <Space direction="vertical" size={18} style={{ width: '100%' }}>
+              <div>
+                <Text strong>练习日期</Text>
+                <DatePicker.RangePicker value={fenbiWrongRange} onChange={value => setFenbiWrongRange(value)} allowClear={false} style={{ width: '100%', marginTop: 8 }} format="YYYY-MM-DD" disabledDate={date => date.isAfter(dayjs(), 'day')} />
+                <Text type="secondary" style={{ display: 'block', marginTop: 6 }}>默认今天，单次最多同步 31 天。只读取已经完成的练习。</Text>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', padding: '12px 14px', background: '#fafafa', borderRadius: 8 }}>
+                <div><Text strong>同时导入正确但超时题</Text><Text type="secondary" style={{ display: 'block', marginTop: 3 }}>关闭时只同步真正答错的题目</Text></div>
+                <Switch checked={includeCorrectOvertime} onChange={setIncludeCorrectOvertime} />
+              </div>
+              <Alert showIcon type="info" message="同步后进入待确认" description="程序会保留你的答案、正确答案、题目图片、粉笔解析、用时和考点，并自动生成分类与复盘思路；重复题不会再次导入。" />
+            </Space>
+          </Modal>
+          <Card className="plan-speed-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
+              <div><Space><TimerOutlined style={{ color: '#bd7418', fontSize: 22 }} /><Text strong style={{ fontSize: 16 }}>今日速度训练</Text><Tag color="orange">正确但超时</Tag></Space><div style={{ marginTop: 6 }}><Text type="secondary">按上次设置快速开始，或进入后调整题量、选题方式和限时标准。</Text></div></div>
+              <Space wrap><Button onClick={() => navigate('/speed-training')}>调整后开始</Button><Button type="primary" icon={<TimerOutlined />} onClick={() => navigate('/speed-training?quick=1')}>开始训练</Button></Space>
+            </div>
+          </Card>
           {phase && (
-            <Card style={{ marginBottom: 16 }} title={<Space><RocketOutlined style={{ color: '#fa8c16' }} />倒排计划：从目标日期往前推</Space>}>
+            <Card className="plan-phase-card" title={<Space><RocketOutlined style={{ color: '#bd7418' }} />当前备考阶段</Space>}>
+              <div className="plan-phase-summary"><Tag color="blue">{phase.name}</Tag><Text type="secondary">本阶段还剩 {phase.phase_days_left} 天</Text></div>
+              {phase.focus && <div className="plan-phase-focus">{phase.focus}</div>}
+              <details className="plan-task-detail plan-phase-detail">
+                <summary>目标日期与阶段安排</summary>
               <Space wrap style={{ marginBottom: 10 }}>
                 <Text strong>目标日期：</Text>
                 {!editingExam ? (
@@ -261,7 +316,7 @@ export function PlanPage() {
                   <Tag color="geekblue">本阶段还剩 {phase.phase_days_left} 天</Tag>
                   <Tag>{phase.phase_start} ~ {phase.phase_end}</Tag>
                 </Space>
-                {phase.focus && <Text style={{ color: '#666' }}>🎯 {phase.focus}</Text>}
+                {phase.focus && <Text style={{ color: '#666' }}>{phase.focus}</Text>}
                 <Steps
                   size="small"
                   current={phase.name === '基础阶段' ? 0 : phase.name === '强化阶段' ? 1 : phase.name === '冲刺阶段' ? 2 : 3}
@@ -272,6 +327,7 @@ export function PlanPage() {
                   关键节点：{phase.milestones.map(m => `${m.date} ${m.label}`).join(' ｜ ')}
                 </Text>
               </Space>
+              </details>
             </Card>
           )}
           {plan.ai_adjusted && (
@@ -279,32 +335,43 @@ export function PlanPage() {
               type="success"
               showIcon
               style={{ marginBottom: 16 }}
-              message={<Text strong>AI 已根据昨天的情况动态调整今天的计划</Text>}
+              message={<Text strong>今天的安排已调整</Text>}
               description={plan.adjustment_reason || '昨天有任务未完成，AI 已调整任务量和顺序。'}
             />
           )}
           {plan.status === 'completed' && (
-            <Alert type="success" showIcon style={{ marginBottom: 16 }} message="昨天的计划已全部完成，今天保持节奏继续！" />
+            <Alert type="success" showIcon style={{ marginBottom: 16 }} message="今天的安排已完成，不需要再追加任务。" />
           )}
 
           <Card
-            style={{ marginBottom: 16 }}
+            className="plan-tasks-card"
             title={
               <Space>
                 <Text strong>今天要完成的事</Text>
                 <Tag color="blue">{doneCount}/{totalTasks} 已完成</Tag>
+                <Text type="secondary" style={{ fontSize: 12 }}>剩余约 {totalMinutes - completedMinutes} 分钟</Text>
               </Space>
             }
-            extra={<Button size="small" type="primary" ghost icon={<ThunderboltOutlined />} loading={regenerating} onClick={regenerate}>让 AI 重新调整今天</Button>}
           >
+            <div className="plan-correction">
+              <Text strong>今天有什么变化？</Text>
+              <Input.TextArea autoSize={{ minRows: 2, maxRows: 4 }} maxLength={2000} value={planCorrection} onChange={e => setPlanCorrection(e.target.value)} disabled={regenerating}
+                style={{ marginTop: 8, marginBottom: 8 }} placeholder="例如：今天很累，只复盘，不做新题。或：今天只做行测，申论另一天。" />
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>不用填表；默认套题分天、复盘优先，已完成任务不会被重置。</Text>
+                <Button type="primary" icon={<AiSparkOutlined />} loading={regenerating} onClick={regenerate}>调整今天</Button>
+              </div>
+            </div>
+            <Text type="secondary" style={{ fontSize: 12 }}>完成进度按计划时长估算，不是实际学习用时</Text>
             <Progress percent={percent} status={percent === 100 ? 'success' : 'active'} style={{ marginBottom: 16 }} />
+            {plan.tasks.length === 0 && <Alert type="info" showIcon message="今天不再安排任务，好好休息。" />}
             <List
               itemLayout="horizontal"
               dataSource={plan.tasks}
               renderItem={(task, idx) => (
-                <List.Item style={{ padding: '10px 4px' }}>
+                <List.Item className={`plan-task${task.done ? ' is-done' : ''}`}>
                   <Space size="middle" align="start" style={{ width: '100%' }}>
-                    <Checkbox checked={!!task.done} onChange={e => toggleTask(task, e.target.checked)} style={{ marginTop: 3 }} />
+                    <Checkbox disabled={regenerating} checked={!!task.done} onChange={e => toggleTask(task, e.target.checked)} style={{ marginTop: 3 }} />
                     <div style={{ flex: 1 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         <Text strong style={{ textDecoration: task.done ? 'line-through' : 'none', color: task.done ? '#999' : undefined }}>
@@ -314,7 +381,7 @@ export function PlanPage() {
                         <Text type="secondary" style={{ fontSize: 12 }}>约 {task.minutes} 分钟</Text>
                       </div>
                       {task.detail && (
-                        <div style={{ marginTop: 4, color: '#888', fontSize: 13 }}>{task.detail}</div>
+                        <details className="plan-task-detail"><summary>查看任务说明</summary><div>{task.detail}</div></details>
                       )}
                     </div>
                   </Space>
@@ -323,13 +390,13 @@ export function PlanPage() {
             />
           </Card>
 
-          <Card title={<Space><ScheduleOutlined style={{ color: '#722ed1' }} />未来的安排（AI 每天根据完成情况持续调整）</Space>} style={{ marginBottom: 16 }}>
+          <Card className="plan-future-card" title={<Space><ScheduleOutlined />接下来一周</Space>}>
             {futureNote && (
               <Alert type="info" showIcon message="AI 对接下来几天的提示" description={futureNote} style={{ marginBottom: 12 }} />
             )}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <Text strong>未来一周倒排安排（从明天开始）</Text>
-              <Button size="small" icon={<ThunderboltOutlined />} loading={forwardLoading} onClick={genForward}>
+              <Button size="small" icon={<AiSparkOutlined />} loading={forwardLoading} onClick={genForward}>
                 {forwardPlan ? '重新生成' : '生成'}
               </Button>
             </div>
@@ -357,27 +424,8 @@ export function PlanPage() {
             )}
           </Card>
 
-          <Card title="今天的完成反馈（明天 AI 会参考它调整计划）" style={{ marginBottom: 16 }}>
-            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-              <Radio.Group value={feedbackStatus} onChange={e => setFeedbackStatus(e.target.value)}>
-                <Radio.Button value="completed">全部完成</Radio.Button>
-                <Radio.Button value="partial">部分完成</Radio.Button>
-                <Radio.Button value="pending">没完成</Radio.Button>
-              </Radio.Group>
-              <Input.TextArea
-                rows={2}
-                placeholder="写几句今天的实际情况：哪块卡住了？身体状态如何？明天想优先做什么？（可选）"
-                value={feedbackNote}
-                onChange={e => setFeedbackNote(e.target.value)}
-              />
-              <Button type="primary" loading={savingFeedback} onClick={saveFeedback}>保存今日反馈</Button>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                每天结束时点一下，第二天打开软件，AI 就会根据这个反馈自动调整计划。
-              </Text>
-            </Space>
-          </Card>
 
-          <Card title="最近 7 天记录" size="small">
+          <Card className="plan-history-card" title="最近 7 天" size="small">
             {history.length === 0 ? (
               <Text type="secondary">还没有历史记录，从今天开始吧。</Text>
             ) : (
@@ -409,18 +457,7 @@ export function PlanPage() {
             )}
           </Card>
 
-          <div style={{ marginTop: 8 }}>
-            <Popconfirm
-              title="让 AI 重新调整今天的计划？"
-              description="会覆盖当前未勾选的任务内容（已勾选的会保留）。"
-              onConfirm={regenerate}
-              okText="调整"
-              cancelText="取消"
-            >
-              <Button icon={<ThunderboltOutlined />} style={{ color: '#722ed1', borderColor: '#d3adf7' }}>觉得今天计划不合适？让 AI 再调一次</Button>
-            </Popconfirm>
-          </div>
-        </>
+        </div>
       )}
     </div>
   )

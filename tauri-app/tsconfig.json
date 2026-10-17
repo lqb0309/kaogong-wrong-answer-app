@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.web.json",
+  "compilerOptions": { "noEmit": true, "rootDir": "..", "composite": false, "declaration": false },
+  "include": ["frontend.ts", "frontend-electron.ts", "../src/renderer/**/*.ts", "../src/renderer/**/*.tsx", "../src/preload/index.ts"]
+}

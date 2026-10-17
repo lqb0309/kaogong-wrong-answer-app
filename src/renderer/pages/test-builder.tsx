@@ -1,14 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { Typography, Card, Table, Button, Tag, Space, App, Input, Select, Row, Col, Image, Empty, InputNumber, Switch, Radio, Divider, Tooltip, Modal, Checkbox, Alert } from 'antd'
-import {
-  ReloadOutlined, ClearOutlined, UpOutlined, DownOutlined,
-  ExportOutlined, FileImageOutlined, ScissorOutlined, PictureOutlined,
-  AimOutlined, CheckCircleOutlined, SortAscendingOutlined
-} from '@ant-design/icons'
+import { useSearchParams, useNavigate } from 'react-router-dom'
+import { Typography, Card, Table, Button, Tag, Space, App, Input, Select, Row, Col, Image, Empty, InputNumber, Switch, Radio, Divider, Tooltip, Modal, Checkbox, Alert, Segmented } from 'antd'
+import { ClearOutlined, UpOutlined, DownOutlined, ScissorOutlined, CheckCircleOutlined, SortAscendingOutlined, SwapOutlined } from '@ant-design/icons'
+import { ReloadOutlined, ExportOutlined, FileImageOutlined, PictureOutlined, AimOutlined, AiSparkOutlined } from '@/components/study-icons'
 import { CanvasCrop } from '@/components/canvas-crop'
 import { PageHeader } from '@/components/page-header'
 import { useTagTreeStore } from '@/stores/tag-tree'
+import { SafeImage } from '@/components/safe-image'
 
 interface Question {
   id: string; level1: string; level2: string; level3: string | null
@@ -17,9 +15,11 @@ interface Question {
   reflection: string | null; error_type: string | null
   group_id: string | null; obsidian_path: string | null
   has_graphics?: number; graphic_image_path?: string | null
+  question_number?: string | null; group_title?: string | null
 }
 
 export function TestBuilderPage() {
+  const navigate = useNavigate()
   const { message } = App.useApp()
   const [searchParams] = useSearchParams()
   const [allQuestions, setAllQuestions] = useState<Question[]>([])
@@ -61,11 +61,16 @@ export function TestBuilderPage() {
 
   // PDF options
   const [pdfTitle, setPdfTitle] = useState('错题练习卷')
-  const [showAnswers, setShowAnswers] = useState(false)
+  const [answerMode, setAnswerMode] = useState<'none' | 'answer' | 'analysis' | 'full'>('none')
   const [pageSize, setPageSize] = useState<'A4' | 'Letter'>('A4')
   const [includeAnswerSheet, setIncludeAnswerSheet] = useState(false)
-  const [onlyGraphicsImages, setOnlyGraphicsImages] = useState(true)
   const [randomCount, setRandomCount] = useState(10)
+  const [builderMode, setBuilderMode] = useState<'smart' | 'manual'>('smart')
+  const [smartGoal, setSmartGoal] = useState<'review' | 'weak' | 'recent' | 'balanced' | 'material'>('review')
+  const [smartCount, setSmartCount] = useState(10)
+  const [avoidRecentDays, setAvoidRecentDays] = useState(7)
+  const [smartLoading, setSmartLoading] = useState(false)
+  const [selectionReasons, setSelectionReasons] = useState<Record<string, string>>({})
 
   // Graphics image preview cache: questionId → dataUrl
   const [graphicPreviews, setGraphicPreviews] = useState<Record<string, string>>({})
@@ -199,6 +204,50 @@ export function TestBuilderPage() {
     message.success(`随机追加 ${toAdd.length} 道题`)
   }
 
+  const runSmartSelect = useCallback(async (replaceId?: string) => {
+    setSmartLoading(true)
+    try {
+      const requestedCount = replaceId ? Math.min(100, selectedOrder.length + 6) : smartCount
+      const res = await window.api.smartSelectTestQuestions({
+        mode: smartGoal,
+        count: requestedCount,
+        level1: filterLevel1,
+        avoidRecentDays
+      })
+      if (!res.success) throw new Error(res.error || '智能选题失败')
+      if (res.ids.length === 0) {
+        message.info(smartGoal === 'material' ? '目前还没有已建立题组的资料分析错题' : '当前范围没有可用错题')
+        return
+      }
+      const details = await window.api.selectTestQuestions({ ids: res.ids })
+      if (details.success) {
+        setAllQuestions(prev => {
+          const map = new Map(prev.map(q => [q.id, q]))
+          for (const q of details.questions) map.set(q.id, q)
+          return Array.from(map.values())
+        })
+      }
+      const reasonMap = Object.fromEntries(res.selections.map(item => [item.id, item.reason]))
+      setSelectionReasons(prev => ({ ...prev, ...reasonMap }))
+      if (replaceId) {
+        const replacement = res.ids.find(id => id !== replaceId && !selectedOrder.includes(id))
+        if (!replacement) {
+          message.info('当前范围暂时没有合适的替换题')
+          return
+        }
+        setSelectedOrder(prev => prev.map(id => id === replaceId ? replacement : id))
+        message.success('已换成另一道更合适的题')
+      } else {
+        setSelectedOrder(res.ids.slice(0, smartCount))
+        message.success(`已按训练目标生成 ${Math.min(res.ids.length, smartCount)} 道题`)
+      }
+    } catch (err: any) {
+      message.error(err.message || '智能选题失败')
+    } finally {
+      setSmartLoading(false)
+    }
+  }, [smartGoal, smartCount, filterLevel1, avoidRecentDays, selectedOrder, message])
+
   const clearSelection = () => setSelectedOrder([])
 
   const removeSelected = (id: string) => {
@@ -256,23 +305,19 @@ export function TestBuilderPage() {
       else setExportProgress('正在生成...')
     })
     try {
-      const result = await window.api.generateTestPdf(selectedOrder, {
-        title: pdfTitle,
-        showAnswers,
-        pageSize,
-        includeAnswerSheet,
-        imageMode: onlyGraphicsImages ? 'graphics_only' : 'full'
-      })
+      const batch = await window.api.createReviewBatch({ ids: selectedOrder })
+      const result = await window.api.exportReviewBatch({ batchId: batch.id, title: pdfTitle, format: 'pdf', content: answerMode, splitAnswers: false, pageSize, includeAnswerSheet })
 
       if (!result.success) {
         message.error(result.error || 'PDF 生成失败')
         return
       }
-      if (result.imageErrors.length > 0) {
-        message.warning(`${result.imageErrors.length} 张图片下载失败，PDF 中可能缺少部分题目图片`)
+      if (result.questionIds) setSelectedOrder(result.questionIds)
+      if (result.imageErrors?.length) {
+        message.warning(`${result.imageErrors.length} 张图片读取失败，PDF 中可能缺少部分题目图片`)
       }
-      if (result.filePath) {
-        message.success(`PDF 已保存到: ${result.filePath}`)
+      if (result.files.length) {
+        message.success(`PDF 已保存到: ${result.files[0]}`)
       } else {
         message.info('已取消保存')
       }
@@ -283,7 +328,7 @@ export function TestBuilderPage() {
       setExporting(false)
       setExportProgress('')
     }
-  }, [selectedOrder, pdfTitle, showAnswers, pageSize, includeAnswerSheet, onlyGraphicsImages, message])
+  }, [selectedOrder, pdfTitle, answerMode, pageSize, includeAnswerSheet, message])
 
   // 按选题顺序解析已选题目
   const qmap = new Map(allQuestions.map(q => [q.id, q]))
@@ -293,6 +338,18 @@ export function TestBuilderPage() {
 
   const graphicsCount = selectedQuestions.filter(q => q.has_graphics === 1 || q.graphic_image_path).length
   const totalErrors = selectedQuestions.reduce((s, q) => s + (q.error_count || 0), 0)
+  const materialGroupCount = new Set(selectedQuestions.filter(q => q.group_id).map(q => q.group_id)).size
+  const estimatedPages = Math.max(1, Math.ceil((selectedQuestions.length + materialGroupCount * 2) / 3))
+
+  const addGroupQuestions = (groupId: string) => {
+    const siblings = allQuestions.filter(question => question.group_id === groupId)
+    setSelectedOrder(previous => {
+      const next = [...previous]
+      for (const sibling of siblings) if (!next.includes(sibling.id)) next.push(sibling.id)
+      return next
+    })
+    message.success(`已加入同组 ${siblings.length} 道错题，公共资料只输出一次`)
+  }
 
   const categoryLabel = (q: Question) => [q.level1, q.level2, q.level3].filter(Boolean).join(' › ')
 
@@ -304,7 +361,7 @@ export function TestBuilderPage() {
     {
       title: '图形', width: 55,
       render: (_: any, r: Question) => hasGraphic(r)
-        ? <Tooltip title="已裁剪图形区域，将嵌入PDF"><Image src={getGraphicSrc(r)} width={40} height={40} style={{ objectFit: 'cover', borderRadius: 3, border: '1px solid #52c41a' }} preview={{ mask: null }} /></Tooltip>
+        ? <Tooltip title="已裁剪图形区域，将嵌入PDF"><SafeImage src={getGraphicSrc(r)} width={40} height={40} style={{ objectFit: 'cover', borderRadius: 3, border: '1px solid #52c41a' }} preview={{ mask: null }} /></Tooltip>
         : r.has_graphics === 1
           ? <Tooltip title="已标记图形题，显示原图"><PictureOutlined style={{ fontSize: 20, color: '#fa8c16' }} /></Tooltip>
           : <span style={{ color: '#ddd', fontSize: 18 }}>-</span>
@@ -312,7 +369,7 @@ export function TestBuilderPage() {
     {
       title: '预览', width: 55,
       render: (_: any, r: Question) => r.image_url
-        ? <Image src={r.image_url} width={40} height={40} style={{ objectFit: 'cover', borderRadius: 3 }} preview={{ mask: null }} />
+        ? <SafeImage src={r.image_url} width={40} height={40} style={{ objectFit: 'cover', borderRadius: 3 }} preview={{ mask: null }} />
         : <FileImageOutlined style={{ fontSize: 28, color: '#ccc' }} />
     },
     { title: '分类', width: 120, ellipsis: true, render: (_: any, r: Question) => <span style={{ fontSize: 12 }}>{categoryLabel(r)}</span> },
@@ -344,10 +401,11 @@ export function TestBuilderPage() {
   return (
     <div>
       <PageHeader
-        title="📝 组卷导出"
-        subtitle="选题顺序即试卷顺序（可调整）· 导出 PDF 后「对答案回填」形成闭环"
+        title="高级组卷与答题回填"
+        subtitle="保留手动排序、裁图和答题卡；导出统一记录到复习中心"
         extra={
           <Space>
+            <Button onClick={() => navigate('/test-builder')}>返回复习与导出</Button>
             <Button icon={<AimOutlined />} onClick={handleSelectFromReviewQueue}>从复习队列选题</Button>
             <Button icon={<CheckCircleOutlined />} onClick={handleOpenAnswer} disabled={selectedOrder.length === 0}>对答案回填</Button>
             <Button icon={<ReloadOutlined />} onClick={loadQuestions} loading={loading}>刷新</Button>
@@ -355,9 +413,59 @@ export function TestBuilderPage() {
         }
       />
 
+      <Card size="small" style={{ marginBottom: 16 }} bodyStyle={{ padding: '12px 16px' }}>
+        <Space wrap size={12} style={{ width: '100%' }}>
+          <Segmented
+            value={builderMode}
+            onChange={value => setBuilderMode(value as 'smart' | 'manual')}
+            options={[{ label: '智能组卷', value: 'smart' }, { label: '手动组卷', value: 'manual' }]}
+          />
+          {builderMode === 'smart' && <>
+            <Select value={smartGoal} onChange={setSmartGoal} style={{ width: 150 }} options={[
+              { value: 'review', label: '今日复习' },
+              { value: 'weak', label: '薄弱专项' },
+              { value: 'recent', label: '新错题重测' },
+              { value: 'balanced', label: '综合均衡练习' },
+              { value: 'material', label: '资料题组专项' }
+            ]} />
+            <Select allowClear placeholder="全部模块" value={filterLevel1} onChange={value => setFilterLevel1(value)} style={{ width: 140 }} options={level1Options} />
+            <Space size={4}><span>题量</span><InputNumber min={1} max={100} value={smartCount} onChange={value => setSmartCount(value || 10)} /></Space>
+            <Space size={4}><span>避开近</span><InputNumber min={0} max={60} value={avoidRecentDays} onChange={value => setAvoidRecentDays(value || 0)} /><span>天做过的题</span></Space>
+            <Button type="primary" icon={<AiSparkOutlined />} loading={smartLoading} onClick={() => runSmartSelect()}>
+              生成练习
+            </Button>
+          </>}
+        </Space>
+      </Card>
+
       <Row gutter={16}>
         {/* Left: Question Browser */}
         <Col span={14}>
+          {builderMode === 'smart' ? (
+            <Card title="本次训练策略" style={{ minHeight: 520 }}>
+              <Alert type="info" showIcon message={{
+                review: '优先选择到期、较久未练且曾经出错的题目',
+                weak: '优先选择重复错误次数较高的薄弱题目',
+                recent: '优先重测最近进入错题库的新题',
+                balanced: '控制同类题比例，尽量覆盖更多知识点',
+                material: '优先按完整资料组抽题；同组公共材料在试卷中仅输出一次'
+              }[smartGoal]} />
+              <div style={{ marginTop: 20, color: '#666', lineHeight: 2 }}>
+                <p>系统会综合错误次数、距离上次练习时间、知识点覆盖和近期重复情况选题。</p>
+                <p>生成后可在右侧调整顺序、删除或单独替换某一道题。</p>
+                <p>图形题和资料题所需图片由程序自动带入，不再需要选择“显示全部图片”。</p>
+              </div>
+              {selectedQuestions.length > 0 && <div style={{ marginTop: 20 }}>
+                <Typography.Title level={5}>结构概览</Typography.Title>
+                <Space wrap>
+                  {Array.from(new Set(selectedQuestions.map(q => q.level1))).map(level => (
+                    <Tag key={level} color="blue">{level} {selectedQuestions.filter(q => q.level1 === level).length} 题</Tag>
+                  ))}
+                  <Tag color="purple">资料题组 {new Set(selectedQuestions.filter(q => q.group_id).map(q => q.group_id)).size} 组</Tag>
+                </Space>
+              </div>}
+            </Card>
+          ) : (
           <Card size="small" title={<span>📋 错题库（共 {allQuestions.length} 题）</span>}
             extra={<Space size="small">
               <Select size="small" placeholder="一级分类" allowClear style={{ width: 96 }} value={filterLevel1}
@@ -385,20 +493,23 @@ export function TestBuilderPage() {
               &nbsp; ✂️ = 裁剪/编辑图形 · 点击行 = 选中/取消
             </div>
           </Card>
+          )}
         </Col>
 
         {/* Right: Selection Panel */}
         <Col span={10}>
           <Card size="small" title={<span>✅ 已选题目（{selectedOrder.length} 题）</span>}
-            extra={<Space size="small">
+            extra={builderMode === 'manual' ? <Space size="small">
               <InputNumber size="small" min={1} max={500} value={randomCount} onChange={v => setRandomCount(v || 10)} style={{ width: 48 }} />
               <Button size="small" onClick={handleRandomSelect}>🎲 随机</Button>
               <Button size="small" icon={<ClearOutlined />} danger onClick={clearSelection} disabled={selectedOrder.length === 0}>清空</Button>
-            </Space>}>
+            </Space> : <Button size="small" icon={<ClearOutlined />} onClick={clearSelection} disabled={selectedOrder.length === 0}>清空</Button>}>
 
             {/* 汇总统计 */}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
               <Tag color="blue">{selectedOrder.length} 题</Tag>
+              <Tag color="purple">{materialGroupCount} 组公共资料</Tag>
+              <Tag>预计约 {estimatedPages} 页</Tag>
               <Tag color="orange">{graphicsCount} 张图形题</Tag>
               <Tag color={totalErrors >= 5 ? 'red' : 'default'}>累计错误 {totalErrors} 次</Tag>
             </div>
@@ -422,17 +533,29 @@ export function TestBuilderPage() {
                   }}>
                     <span style={{ color: '#1677ff', fontWeight: 600, minWidth: 38, fontSize: 12 }}>第{i + 1}题</span>
                     {hasGraphic(q) ? (
-                      <Image src={getGraphicSrc(q)} width={34} height={34}
+                      <SafeImage src={getGraphicSrc(q)} width={34} height={34}
                         style={{ objectFit: 'cover', borderRadius: 3, border: '1px solid #52c41a', flexShrink: 0 }}
                         preview={{ mask: <span style={{ fontSize: 10 }}>查看</span> }} />
                     ) : q.has_graphics === 1 ? (
-                      <Image src={q.image_url} width={34} height={34}
+                      <SafeImage src={q.image_url} width={34} height={34}
                         style={{ objectFit: 'cover', borderRadius: 3, border: '1px solid #fa8c16', flexShrink: 0 }}
                         preview={{ mask: <span style={{ fontSize: 10 }}>查看</span> }} />
                     ) : null}
-                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#666', fontSize: 11 }}>
-                      {categoryLabel(q)} · {(q.ocr_text || '纯图形题').slice(0, 22)}
-                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#666', fontSize: 11 }}>
+                        {categoryLabel(q)} · {(q.ocr_text || '纯图形题').slice(0, 22)}
+                      </div>
+                      {q.group_id && <div style={{ color: '#722ed1', fontSize: 10, marginTop: 1 }}>
+                        资料组 · 第 {q.question_number || '?'} 题
+                        <Button type="link" size="small" style={{ padding: '0 4px', height: 16, fontSize: 10 }} onClick={() => addGroupQuestions(q.group_id!)}>加入同组错题</Button>
+                      </div>}
+                      {builderMode === 'smart' && selectionReasons[q.id] && (
+                        <div style={{ color: '#1677ff', fontSize: 10, marginTop: 1 }}>{selectionReasons[q.id]}</div>
+                      )}
+                    </div>
+                    {builderMode === 'smart' && <Tooltip title="换一道同策略题目">
+                      <Button size="small" type="text" icon={<SwapOutlined />} loading={smartLoading} onClick={() => runSmartSelect(q.id)} />
+                    </Tooltip>}
                     <Tooltip title="上移">
                       <Button size="small" type="text" style={{ padding: 0, fontSize: 11 }} icon={<UpOutlined />}
                         disabled={i === 0} onClick={() => moveSelected(i, -1)} />
@@ -464,20 +587,17 @@ export function TestBuilderPage() {
                 </Radio.Group>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 12, minWidth: 56 }}>显示解析</span>
-                <Switch size="small" checked={showAnswers} onChange={setShowAnswers} />
+                <span style={{ fontSize: 12, minWidth: 56 }}>答案内容</span>
+                <Segmented size="small" value={answerMode} onChange={value => setAnswerMode(value as typeof answerMode)} options={[
+                  { label: '纯题目', value: 'none' }, { label: '答案', value: 'answer' },
+                  { label: '粉笔解析', value: 'analysis' }, { label: '完整复盘', value: 'full' }
+                ]} />
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontSize: 12, minWidth: 56 }}>答题卡</span>
                 <Switch size="small" checked={includeAnswerSheet} onChange={setIncludeAnswerSheet} />
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 12, minWidth: 56 }}>题目图片</span>
-                <Switch size="small" checked={onlyGraphicsImages} onChange={setOnlyGraphicsImages} />
-                <span style={{ fontSize: 11, color: '#888' }}>
-                  {onlyGraphicsImages ? '仅图形题' : '全部显示'}
-                </span>
-              </div>
+              <div style={{ fontSize: 11, color: '#888' }}>题目图片将按题型自动带入；纯文字题不重复显示原图。</div>
             </div>
 
             {/* Export button */}
@@ -509,9 +629,9 @@ export function TestBuilderPage() {
           message="导出顺序 = 右侧「已选题目」列表顺序，可返回再调整" />
         <Space direction="vertical" size={4} style={{ width: '100%' }}>
           <div style={{ fontSize: 13 }}><b>标题：</b>{pdfTitle || '错题练习卷'}</div>
-          <div style={{ fontSize: 13 }}><b>题量：</b>{selectedOrder.length} 题（图形题 {graphicsCount} 张）</div>
+          <div style={{ fontSize: 13 }}><b>题量：</b>{selectedOrder.length} 题 · {materialGroupCount} 组公共资料 · 预计约 {estimatedPages} 页</div>
           <div style={{ fontSize: 13 }}><b>累计错误：</b>{totalErrors} 次</div>
-          <div style={{ fontSize: 13 }}><b>选项：</b>纸张 {pageSize} · {showAnswers ? '含解析' : '纯题目'} · {includeAnswerSheet ? '附答题卡' : '无答题卡'} · 图片{onlyGraphicsImages ? '仅图形' : '全部'}</div>
+          <div style={{ fontSize: 13 }}><b>选项：</b>纸张 {pageSize} · {{ none: '纯题目', answer: '含答案', analysis: '含粉笔解析', full: '含完整复盘' }[answerMode]} · {includeAnswerSheet ? '附答题卡' : '无答题卡'} · 图片自动判断</div>
         </Space>
         <div style={{ marginTop: 12, maxHeight: 200, overflow: 'auto', borderTop: '1px solid #f0f0f0', paddingTop: 8 }}>
           {selectedQuestions.map((q, i) => (

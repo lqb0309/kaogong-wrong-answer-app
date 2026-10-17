@@ -1,10 +1,8 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Typography, Card, Row, Col, Statistic, Table, Tag, Select, Space, Button, App, Spin, Progress, Empty, Segmented, DatePicker } from 'antd'
-import {
-  FileTextOutlined, CalendarOutlined, ReloadOutlined,
-  BulbOutlined, WarningOutlined, PlusCircleOutlined
-} from '@ant-design/icons'
+import { WarningOutlined, PlusCircleOutlined } from '@ant-design/icons'
+import { FileTextOutlined, CalendarOutlined, ReloadOutlined, BulbOutlined } from '@/components/study-icons'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   LineChart, Line, CartesianGrid, AreaChart, Area,
@@ -28,6 +26,7 @@ interface StatsData {
   latestAttempt: { accuracy: number; created_at: string } | null
   reviewDaily: Array<{ date: string; cnt: number }>
   weaknessPoints: Array<{ level1: string; level2: string; question_count: number; total_errors: number; repeated_count: number; last_error_at: string }>
+  speedTraining?: { attempts: number; achievement_rate: number; avg_saved_seconds: number; pending: number; daily: Array<{ day: string; avg_seconds: number; attempts: number }> }
 }
 
 export function StatsPage() {
@@ -155,7 +154,7 @@ export function StatsPage() {
     { title: '累计错误', dataIndex: 'total_errors', width: 82, render: (v: number) => <Text strong style={{ color: v >= threshold ? '#ff4d4f' : '#fa8c16' }}>{v}</Text> },
     { title: '重复出错', dataIndex: 'repeated_count', width: 82 },
     { title: '状态', width: 80, render: (_: any, r: any) => <Tag color={r.total_errors >= threshold * 2 ? 'red' : r.total_errors >= threshold ? 'orange' : 'blue'}>{r.total_errors >= threshold * 2 ? '薄弱' : r.total_errors >= threshold ? '待巩固' : '新发现'}</Tag> },
-    { title: '操作', width: 82, render: (_: any, r: any) => <Button size="small" type="link" onClick={() => navigate(`/test-builder?level1=${encodeURIComponent(r.level1)}&level2=${encodeURIComponent(r.level2 || '')}`)}>专项组卷</Button> }
+    { title: '操作', width: 100, render: (_: any, r: any) => <Button size="small" type="link" onClick={() => navigate(`/test-builder?level1=${encodeURIComponent(r.level1)}&level2=${encodeURIComponent(r.level2 || '')}`)}>复习／导出</Button> }
   ]
 
   return (
@@ -223,6 +222,15 @@ export function StatsPage() {
         <Col xs={24} md={8}><Card size="small"><Statistic title="近 30 天复习再错率" value={stats.reviewWrongRate || 0} suffix="%" valueStyle={{ color: stats.reviewWrongRate > 30 ? '#ff4d4f' : '#52c41a' }} /></Card></Col>
         <Col xs={24} md={8}><Card size="small"><Statistic title="最近组卷正确率" value={stats.latestAttempt ? Math.round(stats.latestAttempt.accuracy * 100) : 0} suffix="%" /><Text type="secondary">{stats.latestAttempt ? stats.latestAttempt.created_at?.slice(0, 10) : '暂无组卷记录'}</Text></Card></Col>
       </Row>
+
+      <Card title="速度训练" size="small" style={{ marginBottom: 12 }} extra={<Button type="link" onClick={() => navigate('/speed-training')}>开始训练</Button>}>
+        <Row gutter={[12, 12]}>
+          <Col xs={12} md={6}><Statistic title="仍未达标" value={stats.speedTraining?.pending || 0} suffix="题" valueStyle={{ color: '#fa8c16' }} /></Col>
+          <Col xs={12} md={6}><Statistic title="本周训练" value={stats.speedTraining?.attempts || 0} suffix="次" /></Col>
+          <Col xs={12} md={6}><Statistic title="限时达标率" value={stats.speedTraining?.achievement_rate || 0} suffix="%" valueStyle={{ color: '#52c41a' }} /></Col>
+          <Col xs={12} md={6}><Statistic title="平均节省时间" value={stats.speedTraining?.avg_saved_seconds || 0} suffix="秒" /></Col>
+        </Row>
+      </Card>
 
       {/* Chart Row 1: Trend + Distribution */}
       <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>

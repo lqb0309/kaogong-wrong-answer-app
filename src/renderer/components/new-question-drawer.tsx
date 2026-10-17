@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { App, Button, Drawer, Form, Image, Input, InputNumber, Segmented, Select, Space, Typography } from 'antd'
-import { InboxOutlined } from '@ant-design/icons'
+import { InboxOutlined } from '@/components/study-icons'
 import { useTagTreeStore } from '@/stores/tag-tree'
 
 export function NewQuestionDrawer({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated?: (pendingReview: boolean) => void }) {

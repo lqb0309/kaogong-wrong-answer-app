@@ -1,0 +1,51 @@
+name: Tauri macOS Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-native-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Shared dependencies and checks
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Tauri dependencies
+        working-directory: tauri-app
+        run: npm ci --ignore-scripts
+      - name: Build private service and desktop app
+        working-directory: tauri-app
+        run: |
+          npm run prepare:runtime
+          npm run typecheck
+          npm run test:rust
+          npm run build
+      - name: Verify and archive native build
+        run: |
+          mkdir -p release-assets
+          codesign --verify --deep --strict 'tauri-app/src-tauri/target/release/bundle/macos/小乖的考公错题屋.app'
+          ditto -c -k --sequesterRsrc --keepParent 'tauri-app/src-tauri/target/release/bundle/macos/小乖的考公错题屋.app' 'release-assets/kaogong-tauri-macos-${{ runner.arch }}.zip'
+          shasum -a 256 release-assets/*.zip > release-assets/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tauri-macos-${{ runner.arch }}
+          path: release-assets/
+          if-no-files-found: error
+
+# Artifacts are not automatically published to a Release. Only verified native
+# builds are uploaded there, so a runner/architecture change cannot replace a
+# manually verified release asset with an untested package.

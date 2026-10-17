@@ -1,0 +1,36 @@
+description: 生产复盘提示词质量回归（仅合成题目，默认禁止付费）
+prompts:
+  - '{{question}}'
+providers:
+  - file://reflection-provider.cjs
+defaultTest:
+  assert:
+    - type: contains
+      value: 考点与识别信号
+    - type: contains
+      value: 标准解题路径
+    - type: contains
+      value: 易错复盘
+    - type: not-contains
+      value: 我们需要先分析用户
+tests:
+  - description: 有明确作答记录，没有粉笔解析，不能声称没有错误信息
+    vars:
+      question: '{"level1":"资料分析","ocrText":"某单位2023年100人，2024年120人，同比增长多少？A.10% B.20% C.30% D.40%","correctAnswer":"B","userAnswer":"A"}'
+    assert:
+      - type: contains
+        value: 20%
+      - type: not-contains
+        value: 未提供错误类型
+  - description: 会员广告不能当作原始解析
+    vars:
+      question: '{"level1":"数量关系","ocrText":"2+3等于多少？A.4 B.5 C.6 D.7","correctAnswer":"B","userAnswer":"C","officialAnalysis":"视频\n粉笔\n行测\n会员\n21272192人已开通"}'
+    assert:
+      - type: not-contains
+        value: 21272192
+  - description: 量词解释必须通俗，不凭空编造题目条件
+    vars:
+      question: '{"level1":"判断推理","ocrText":"所有甲都是乙，是否必然意味着所有乙都是甲？A.是 B.不是","correctAnswer":"B","userAnswer":"A","officialAnalysis":"根据题干，所有甲都是乙只说明甲包含在乙中，乙可能还有其他成员，所以不能倒推，故选B。"}'
+    assert:
+      - type: contains
+        value: 不能

@@ -14,7 +14,9 @@ const LogViewerPage = lazy(() => import('./pages/log-viewer').then(m => ({ defau
 const SettingsPage = lazy(() => import('./pages/settings').then(m => ({ default: m.SettingsPage })))
 const KnowledgePage = lazy(() => import('./pages/knowledge').then(m => ({ default: m.KnowledgePage })))
 const TestBuilderPage = lazy(() => import('./pages/test-builder').then(m => ({ default: m.TestBuilderPage })))
+const ReviewCenterPage = lazy(() => import('./pages/review-center').then(m => ({ default: m.ReviewCenterPage })))
 const PlanPage = lazy(() => import('./pages/plan').then(m => ({ default: m.PlanPage })))
+const SpeedTrainingPage = lazy(() => import('./pages/speed-training').then(m => ({ default: m.SpeedTrainingPage })))
 
 function lazyPage(node: ReactNode) {
   return (
@@ -34,6 +36,7 @@ export function AppRouter() {
       <Route element={<AppLayout />}>
         <Route path="/" element={lazyPage(<HomePage />)} />
         <Route path="/plan" element={lazyPage(<PlanPage />)} />
+        <Route path="/speed-training" element={lazyPage(<SpeedTrainingPage />)} />
         <Route path="/pending" element={lazyPage(<PendingPage />)} />
         <Route path="/pending/review" element={lazyPage(<ReflectionReviewPage />)} />
         <Route path="/questions" element={lazyPage(<QuestionBankPage />)} />
@@ -42,7 +45,8 @@ export function AppRouter() {
         <Route path="/tags" element={lazyPage(<TagManagerPage />)} />
         <Route path="/logs" element={lazyPage(<LogViewerPage />)} />
         <Route path="/manual" element={<Navigate to="/" replace />} />
-        <Route path="/test-builder" element={lazyPage(<TestBuilderPage />)} />
+        <Route path="/test-builder" element={lazyPage(<ReviewCenterPage />)} />
+        <Route path="/test-builder/advanced" element={lazyPage(<TestBuilderPage />)} />
         <Route path="/settings" element={lazyPage(<SettingsPage />)} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

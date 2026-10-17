@@ -5,7 +5,7 @@ import { getDb } from './db'
 
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL'
 type LogModule = 'upload' | 'ai' | 'confirm' | 'obsidian' | 'tag' | 'system'
-  | 'image' | 'vault' | 'storage' | 'pdf_gen' | 'knowledge' | 'auto_induct' | 'test' | 'retry' | 'daily_plan'
+  | 'image' | 'vault' | 'storage' | 'pdf_gen' | 'knowledge' | 'auto_induct' | 'test' | 'retry' | 'daily_plan' | 'fenbi'
 
 interface LogEntry {
   timestamp: string

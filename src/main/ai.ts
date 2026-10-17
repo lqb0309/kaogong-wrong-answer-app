@@ -4,7 +4,9 @@ import { getTagTree } from './tag-service'
 import { logger } from './logger'
 import { generateTraceId, toImageUrl } from './utils'
 import OpenAI from 'openai'
+import { readImageBuffer } from './image-assets'
 import { recordAiUsage } from './ai-usage'
+import { aiOutputOptions, parseValidatedAi, classifySchema, visionSchema, materialGroupSchema, inductionEnvelopeSchema } from './ai-validation'
 
 interface ClassifyResult {
   level1: string
@@ -26,6 +28,133 @@ interface ClassifyResult {
 }
 
 export type ProgressCallback = (stage: string, message: string) => void
+
+export interface MaterialGroupAnalysis {
+  title: string
+  passage_text: string
+  questions: Array<{
+    question_number: string
+    ocr_text: string
+    correct_answer: string
+    user_answer: string
+    is_wrong: boolean | null
+    level1: string
+    level2: string
+    level3: string | null
+    confidence: number
+    error_type: string
+    reflection: string
+    material_image_indexes: number[]
+  }>
+}
+
+export async function analyzeMaterialGroup(
+  imageUrls: string[],
+  traceId?: string,
+  onProgress?: ProgressCallback
+): Promise<MaterialGroupAnalysis> {
+  if (imageUrls.length < 1) throw new Error('资料题组至少需要一张图片')
+  const apiKey = readConfig('vision_api_key')
+  if (!apiKey) throw new Error('资料题组识别需要配置图像理解模型')
+  const baseURL = readConfig('vision_base_url') || 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+  const model = readConfig('vision_model') || 'qwen-vl-max'
+  const tid = traceId || generateTraceId()
+  const client = new OpenAI({ apiKey: decryptToken(apiKey), baseURL })
+  const tagTree = getTagTree()
+
+  onProgress?.('vision', `正在读取 ${imageUrls.length} 张连续资料截图...`)
+  const imageParts = imageUrls.map(url => ({ type: 'image_url' as const, image_url: { url: toImageUrl(url) } }))
+  const prompt = `这些图片按顺序属于同一套公务员考试资料题，可能跨页，包含公共材料、图表和多道子题。
+请完整识别所有子题，尤其读取“正确答案”和“你的答案”。不要把图片边界当成题目边界。
+
+分类只能参考以下标签树：${JSON.stringify(tagTree)}
+
+输出 JSON：
+{
+  "title":"题组简短标题",
+  "passage_text":"公共文字材料摘要，不重复题干",
+  "questions":[{
+    "question_number":"原题号",
+    "ocr_text":"完整题干和选项",
+    "correct_answer":"正确答案，未识别则空字符串",
+    "user_answer":"你的答案，未识别则空字符串",
+    "is_wrong":true/false/null,
+    "level1":"一级分类",
+    "level2":"二级分类",
+    "level3":"三级分类或null",
+    "confidence":0到1,
+    "error_type":"具体错误类型，答对则空字符串",
+    "reflection":"仅对错题生成：材料定位、公式、单位、速算过程、错因和考场最快路径；答对则空字符串",
+    "material_image_indexes":[该题依赖的图片序号，从1开始]
+  }]
+}
+is_wrong 判定规则：两个答案都清楚且不相同为 true，相同为 false，任一缺失为 null。禁止猜测答案。只输出 JSON。`
+
+  let lastError: unknown
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        messages: [{ role: 'user', content: [...imageParts, { type: 'text' as const, text: prompt }] }],
+        response_format: { type: 'json_object' },
+        ...aiOutputOptions(baseURL, model, 7000, attempt)
+      })
+      recordAiUsage(response, 'material_group', 'vision', model)
+      const result = parseValidatedAi(response.choices[0]?.message?.content || '', materialGroupSchema, response.choices[0]?.finish_reason) as MaterialGroupAnalysis
+      if (!Array.isArray(result.questions)) throw new Error('AI 未返回子题列表')
+      result.questions = result.questions.map(question => {
+        const matched = applyFuzzyMatch({
+          ...question,
+          ocr_text: question.ocr_text || '',
+          reasoning: '',
+          level3: question.level3 || null
+        }, tagTree)
+        return {
+          ...question,
+          level1: matched.level1,
+          level2: matched.level2,
+          level3: matched.level3,
+          material_image_indexes: Array.isArray(question.material_image_indexes)
+            ? question.material_image_indexes.filter(index => Number.isInteger(index) && index >= 1 && index <= imageUrls.length)
+            : imageUrls.map((_, index) => index + 1)
+        }
+      })
+
+      // Some vision models reliably split the questions but omit the longer
+      // reflection field. Match the normal single-question pipeline by filling
+      // reflections with the configured reasoning model before saving the group.
+      for (const question of result.questions) {
+        if (question.is_wrong === false || question.reflection?.trim()) continue
+        const answerContext = [
+          question.ocr_text,
+          question.correct_answer ? `正确答案：${question.correct_answer}` : '',
+          question.user_answer ? `你的答案：${question.user_answer}` : ''
+        ].filter(Boolean).join('\n')
+        try {
+          question.reflection = await generateReflection({
+            level1: question.level1,
+            level2: question.level2,
+            level3: question.level3,
+            ocrText: answerContext,
+            errorType: question.error_type || '',
+            traceId: tid,
+            materialText: result.passage_text,
+            imageUrls: question.material_image_indexes.map(index => imageUrls[index - 1]).filter(Boolean)
+          }, onProgress)
+        } catch (reflectionError: any) {
+          logger.warn('ai', 'material_reflection_failed', `资料题第 ${question.question_number || '?'} 题复盘生成失败: ${reflectionError.message}`, null, tid)
+          question.reflection = ''
+        }
+      }
+      onProgress?.('done', `识别到 ${result.questions.length} 道子题`)
+      return result
+    } catch (error) {
+      lastError = error
+      if (attempt < 2) onProgress?.('vision', '题组结果不完整，正在重试...')
+    }
+  }
+  throw new Error(`资料题组识别失败：${lastError instanceof Error ? lastError.message : String(lastError)}`)
+}
 
 export async function classifyImage(imageUrl: string, traceId?: string, onProgress?: ProgressCallback): Promise<ClassifyResult> {
   const tid = traceId || generateTraceId()
@@ -78,13 +207,13 @@ export async function classifyImage(imageUrl: string, traceId?: string, onProgre
           }
         ],
         response_format: { type: 'json_object' },
-        max_tokens: 2000
+        ...aiOutputOptions(visionURL, visionModel, 2000)
       })
       recordAiUsage(resp, 'classify', 'vision', visionModel)
 
       const duration = Date.now() - startTime
       const content = resp.choices[0]?.message?.content || '{}'
-      const result = JSON.parse(content) as ClassifyResult
+      const result = parseValidatedAi(content, classifySchema, resp.choices[0]?.finish_reason) as ClassifyResult
 
       logger.info('ai', 'classify_success', '单模型分类完成', {
         model: visionModel,
@@ -128,12 +257,12 @@ export async function classifyImage(imageUrl: string, traceId?: string, onProgre
         }
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 2000
+      ...aiOutputOptions(visionURL, visionModel, 2000, attempt)
     })
     recordAiUsage(visionResp, 'ocr', 'vision', visionModel)
 
     const visionContent = visionResp.choices[0]?.message?.content || '{}'
-    visionResult = JSON.parse(visionContent)
+    visionResult = parseValidatedAi(visionContent, visionSchema, visionResp.choices[0]?.finish_reason)
     ocrText = visionResult.ocr_text || ''
     imageDescription = visionResult.description || ''
 
@@ -173,13 +302,13 @@ ${imageDescription ? `【题目分析】\n${imageDescription}\n` : ''}
         { role: 'user', content: userText }
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 1500
+      ...aiOutputOptions(reasonURL, reasonModel, 1500)
     })
     recordAiUsage(classifyResp, 'classify', 'reason', reasonModel)
 
     const totalDuration = Date.now() - startTime
     const content = classifyResp.choices[0]?.message?.content || '{}'
-    const result = JSON.parse(content) as ClassifyResult
+    const result = parseValidatedAi(content, classifySchema, classifyResp.choices[0]?.finish_reason) as ClassifyResult
 
     if (!result.ocr_text && ocrText) result.ocr_text = ocrText
     // Bridge graphics detection from vision stage (vision sees the image)
@@ -317,9 +446,11 @@ function fuzzyMatch(aiResult: any, tree: TreeNode[]): { type: string; node?: any
 
   const allNodes = flattenTree(tree)
 
-  // Exact match on level2 + level3
-  for (const node of allNodes) {
-    if (node.name === aiResult.level2 || node.name === aiResult.level3) {
+  // Exact match by display name or stable internal id. Prefer the deepest AI
+  // label so `level1=data, level2=data-ratio` maps to 资料分析 > 比重计算.
+  for (const target of [aiResult.level3, aiResult.level2, aiResult.level1].filter(Boolean)) {
+    for (const node of allNodes) {
+      if (node.name !== target && node.node.id !== target) continue
       return {
         type: 'exact',
         node: {
@@ -392,7 +523,7 @@ export async function getAiSuggestion(statsData: any): Promise<string> {
         { role: 'system', content: '你是一位公务员考试备考顾问，擅长分析错题数据并给出针对性的备考建议。请用中文回复。' },
         { role: 'user', content: buildSuggestionPrompt(statsData) }
       ],
-      max_tokens: 1200
+      ...aiOutputOptions(visionURL, visionModel, 1200)
     })
     recordAiUsage(resp, 'suggestion', 'vision', visionModel)
     return resp.choices[0]?.message?.content || '无法生成建议'
@@ -405,7 +536,7 @@ export async function getAiSuggestion(statsData: any): Promise<string> {
       { role: 'system', content: '你是一位公务员考试备考顾问，擅长分析错题数据并给出针对性的备考建议。请用中文回复。' },
       { role: 'user', content: buildSuggestionPrompt(statsData) }
     ],
-    max_tokens: 1200
+    ...aiOutputOptions(reasonURL, reasonModel, 1200)
   })
   recordAiUsage(resp, 'suggestion', 'reason', reasonModel)
   return resp.choices[0]?.message?.content || '无法生成建议'
@@ -450,7 +581,57 @@ ${topSummary}
 请用中文回复，200-400 字即可。`
 }
 
-type ReflectionParams = { level1: string; level2?: string; level3?: string | null; ocrText: string; errorType?: string; traceId?: string }
+type ReflectionParams = {
+  level1: string
+  level2?: string
+  level3?: string | null
+  ocrText: string
+  errorType?: string
+  traceId?: string
+  officialAnalysis?: string
+  correctAnswer?: string
+  userAnswer?: string
+  answerTime?: string
+  correctRate?: string
+  difficulty?: number | null
+  materialText?: string
+  imageUrls?: string[]
+  timingBasis?: string
+  groupActualSeconds?: number | null
+  groupTargetSeconds?: number | null
+  groupGraceSeconds?: number | null
+}
+
+export function reflectionTimingContext(params: ReflectionParams): string {
+  if (params.timingBasis !== 'group') return '没有完整题组口径；仅有答题用时不能自行断言超时，优先沿用已记录的错误类型。'
+  const actual = params.groupActualSeconds, target = params.groupTargetSeconds
+  if (typeof actual !== 'number' || !Number.isFinite(actual) || actual < 0 || typeof target !== 'number' || !Number.isFinite(target) || target <= 0) return '资料分析按整组总用时评估；本组用时不完整，不判断超时，不能用单题秒数补判。'
+  const grace = typeof params.groupGraceSeconds === 'number' && Number.isFinite(params.groupGraceSeconds) ? Math.max(0, params.groupGraceSeconds) : 0
+  return `资料分析只按整组总时间评估：本组实际 ${actual} 秒，参考 ${target} 秒，宽限 ${grace} 秒，${actual > target + grace ? '本组超时' : '本组未超时'}。单题时间只供定位步骤参考，不能据此把本题判为超时或不熟练；本组未超时时不得写“本题耗时偏长”。`
+}
+
+/** Final safety gate for imported web content, including legacy Fenbi records. */
+function reliableOfficialAnalysis(raw?: string): string {
+  if (!raw) return ''
+  const cleaned = raw
+    .replace(/\u00a0/g, ' ')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !/^(?:视频|粉笔(?:行测)?|会员|收藏|笔记|下载\s*APP|\d+\s*人已开通)$/i.test(line))
+    .join('\n')
+    .replace(/^(?:答案)?解析\s*[：:]?\s*/, '')
+    .trim()
+  if (cleaned.length < 20) return ''
+  const obviousPageNoise = /(?:开通会员|人已开通|观看视频|下载.*APP|扫码|登录后|购买课程|粉笔公考)/i.test(cleaned)
+  const hasExplanation = /(?:本题|根据|可知|因此|所以|故|选项|排除|代入|计算|正确|错误|答案|解析|题干|由此)/.test(cleaned)
+  if (obviousPageNoise && !hasExplanation) return ''
+  if (!hasExplanation) return ''
+  return cleaned.length > 8000 ? '' : cleaned
+}
+
+export function reflectionOutputOptions(baseURL: string, model: string, attempt: number): { max_tokens: number; reasoning_effort?: 'low' } {
+  return aiOutputOptions(baseURL, model, 3000, attempt)
+}
 
 export async function generateReflection(params: ReflectionParams, onProgress?: ProgressCallback): Promise<string> {
   const reasonKey = readConfig('ai_api_key')
@@ -463,14 +644,54 @@ export async function generateReflection(params: ReflectionParams, onProgress?: 
   }
 
   const apiKey = decryptToken(reasonKey || readConfig('vision_api_key') || '')
-  const client = new OpenAI({ apiKey, baseURL: reasonKey ? reasonURL : (readConfig('vision_base_url') || 'https://dashscope.aliyuncs.com/compatible-mode/v1') })
+  const client = new OpenAI({ apiKey, baseURL: reasonKey ? reasonURL : (readConfig('vision_base_url') || 'https://dashscope.aliyuncs.com/compatible-mode/v1'), timeout: 90_000, maxRetries: 0 })
   const model = reasonKey ? reasonModel : (readConfig('vision_model') || 'qwen-vl-max')
 
   const levelPath = [params.level1, params.level2, params.level3].filter(Boolean).join(' > ')
+  let officialAnalysis = reliableOfficialAnalysis(params.officialAnalysis)
+  const analysisImages = [...officialAnalysis.matchAll(/!\[[^\]]*\]\(<([^>]+)>\)/g)].map(match => match[1])
+  // Never pass image URLs to a text model as if they were readable formulas.
+  // Large/incomplete references are omitted rather than partially quoted.
+  if (analysisImages.length > 12) officialAnalysis = ''
+  let visualFacts = ''
+  const imageUrls = [...new Set((officialAnalysis && analysisImages.length ? analysisImages : (params.imageUrls || [])).filter(Boolean))].slice(0, 12)
+  if (imageUrls.length && (!officialAnalysis || analysisImages.length)) {
+    const visionKey = readConfig('vision_api_key')
+    if (!visionKey) throw new Error('题目依赖图表且没有可靠解析，需要配置视觉模型后重新生成')
+    onProgress?.('vision', '正在读取题目依赖的图表与选项图片...')
+    const images = await Promise.all(imageUrls.map(async url => {
+      const { buffer, mime } = await readImageBuffer(url)
+      return { type: 'image_url' as const, image_url: { url: `data:${mime};base64,${buffer.toString('base64')}` } }
+    }))
+    const visionModel = readConfig('vision_model') || 'qwen-vl-max'
+    const vision = new OpenAI({ apiKey: decryptToken(visionKey), baseURL: readConfig('vision_base_url') || 'https://dashscope.aliyuncs.com/compatible-mode/v1', timeout: 90_000, maxRetries: 0 })
+    const response = await vision.chat.completions.create({ model: visionModel, messages: [{ role: 'user', content: [{ type: 'text', text: `${officialAnalysis ? '按顺序将粉笔解析图片中的公式和计算过程转写为可读文字或 LaTeX，标注图片序号。' : '只提取以下题目所需的图表数据、几何关系和选项图形。'}不作推测或补造。保留图片顺序和单位，读不清的明确标注。题目：${params.ocrText}` }, ...images] }], max_tokens: 3500 })
+    recordAiUsage(response, 'reflection_image_context', 'vision', visionModel)
+    visualFacts = response.choices[0]?.message?.content?.trim() || ''
+    if (!visualFacts || response.choices[0]?.finish_reason === 'length') throw new Error('题目图表未完整读取，请重新生成')
+  }
+  if (officialAnalysis && analysisImages.length) {
+    let imageIndex = 0
+    officialAnalysis = officialAnalysis.replace(/!\[[^\]]*\]\(<[^>]+>\)/g, () => `【解析图片${++imageIndex}，公式转写见图像读取；读不清时不得引用】`)
+  }
   const context = `【题目分类】${levelPath || '未分类'}
 【人工标注错误类型】${params.errorType || '无（请优先从 OCR 中的“你的答案/正确答案”及选项内容分析具体错因）'}
-【题目 OCR】
-${params.ocrText || '未提供。不得虚构题干、选项、答案或数字，只能给出该题型的通用复盘框架。'}`
+【图表与选项图片读取】
+${visualFacts || '无补充图表数据'}
+【公共资料】
+${params.materialText || '未提供（不得虚构资料中的数值或图表）'}
+【题目与选项】
+${params.ocrText || '未提供。不得虚构题干、选项、答案或数字，只能给出该题型的通用复盘框架。'}
+【作答记录】
+- 正确答案：${params.correctAnswer || '未提供'}
+- 我的答案：${params.userAnswer || '未提供'}
+- 答题用时：${params.answerTime || '未提供'}
+- 全站正确率：${params.correctRate || '未提供'}
+- 练习难度：${params.difficulty ?? '未提供'}
+【用时评估口径】
+${reflectionTimingContext(params)}
+【粉笔官方解析】
+${officialAnalysis || '未提供（不要引用或推测粉笔解析，只依据题干、选项和答案复盘）'}`
   const customPrompt = readConfig('reflection_prompt')?.trim()
   const defaultPrompt = `请生成一份适合个人错题复习的精炼复盘，目标是让用户下次遇到同类题时能识别、解出并避开原错误。
 
@@ -501,7 +722,13 @@ ${params.ocrText || '未提供。不得虚构题干、选项、答案或数字�
 【成品表达规则】
 - 直接面向学习者写复盘，不得出现“用户未提供”“字段缺失”“根据输入信息”等系统或数据处理措辞。
 - 优先使用通俗中文。若必须使用 ∀、∃、¬、→、↔ 等逻辑符号，第一次出现时必须在同一句紧跟中文含义；不能只写符号推导。
-- OCR 中出现“你的答案/正确答案”时，它们就是有效作答信息，必须用于具体分析错因。`
+- 作答记录中的“我的答案/正确答案”是有效事实，必须用于具体分析错因。
+- 如果提供了粉笔官方解析，把它视为本题答案与标准解法的第一依据，不得与其结论冲突，也不要原样复述。
+- 在粉笔解析基础上做有价值的拓展：补全省略步骤、解释为什么这样做、对比我的错误选项、提炼更短的考场路径。
+- 若粉笔解析与题目明显无关或只含导航、会员、视频等页面杂项，忽略这些杂项，并明确只依据可靠题干与答案作答。
+- 如有用时、正确率或难度数据，只在能形成行动建议时使用；不要机械罗列数据。
+- 若我的答案与正确答案相同，明确是答对题，不虚构错选。仅有用时记录时，不能断言我实际采用了何种解法；潜在耗时原因必须标为“可能”，与已知事实区分。
+- 基期与现期、同比与环比、倍数与相差倍数不能混用。任何快速排除都必须满足材料中的比较条件，不能仅凭现期比例直接判断基期比例。`
   const prompt = `${customPrompt || defaultPrompt}
 
 ${universalRules}
@@ -518,19 +745,19 @@ ${context}`
       const resp = await client.chat.completions.create({
         model,
         messages: [
-          { role: 'system', content: '你是一位严谨的公务员考试错题复盘教练。只依据已提供信息作答，明确区分事实与推测，禁止虚构题目条件、答案和技巧。' },
+          { role: 'system', content: '你是一位严谨的公务员考试错题复盘教练。粉笔官方解析是标准答案依据；你的任务是做面向学习者的解释、错误对比和方法拓展，而不是推翻官方结论。只依据已提供信息作答，禁止虚构题目条件、答案和技巧。' },
           { role: 'user', content: prompt }
         ],
-        max_tokens: 3000
+        ...reflectionOutputOptions(reasonKey ? reasonURL : (readConfig('vision_base_url') || ''), model, attempt)
       })
       recordAiUsage(resp, 'reflection', reasonKey ? 'reason' : 'vision', model)
 
       const msg = resp.choices[0]?.message as any
-      const result = msg?.content || msg?.reasoning_content || ''
+      const result = msg?.content || ''
 
       // Check if response was truncated by token limit
       if (resp.choices[0]?.finish_reason === 'length') {
-        logger.warn('ai', 'reflection_truncated', '复盘思路可能被截断（达到 token 上限）', { model, attempt }, tid)
+        throw new Error('复盘正文被截断，请重新生成')
       }
 
       logger.info('ai', 'reflection_success', `复盘思路生成完成 (第${attempt}次)`, {
@@ -539,7 +766,17 @@ ${context}`
         attempt
       }, tid)
 
-      if (result) return result
+      if (result) {
+        // Some reasoning models may prepend their private scratchpad to the final
+        // answer. Persist only the requested, learner-facing Markdown sections.
+        const requiredHeading = result.search(/^##\s*考点与识别信号\s*$/m)
+        const cleaned = requiredHeading >= 0 ? result.slice(requiredHeading).trim() : result.trim()
+        const looksLikeScratchpad = /我们只需要|按照要求生成|先分析|用户要求|需要分析错因|我将|we need|let's think/i.test(cleaned.slice(0, 240))
+        const requiredSections = ['考点与识别信号', '标准解题路径', '考场最短路径', '易错复盘', '下次行动规则']
+        const complete = !!customPrompt || requiredSections.every(section => new RegExp('^##\\s*' + section + '\\s*$', 'm').test(cleaned))
+        if (!looksLikeScratchpad && complete) return cleaned
+        logger.warn('ai', 'reflection_scratchpad_rejected', '检测到复盘包含模型推理草稿，已拒绝保存并重试', { attempt }, tid)
+      }
       if (attempt < 2) {
         logger.warn('ai', 'reflection_retry', '复盘思路返回空内容，自动重试', { model, attempt }, tid)
       }
@@ -549,12 +786,14 @@ ${context}`
     }
   }
 
-  return ''
+  throw new Error('复盘未返回可用的正文，请重新生成；未将空内容标记为成功')
 }
 
 // ============ Daily Knowledge Induction (PRD v0.2 Section 3) ============
 
 export interface DailyInductionInput {
+  /** Date selected by the application. Never infer this from question/OCR text. */
+  targetDate: string
   todayQuestions: Array<{
     id: string
     level1: string
@@ -653,55 +892,88 @@ export async function generateDailyInduction(
 
   onProgress?.('induct', `正在调用 ${model} 分析 ${input.todayQuestions.length} 道错题...`, 20, 0)
 
-  // Phase 3: Streaming AI call with real progress
+  // Phase 3: Streaming AI call with real progress. JSON responses can occasionally
+  // be empty or truncated by providers, so validate and retry once before failing.
   const client = new OpenAI({ apiKey, baseURL })
-  let fullContent = ''
-  let tokenCount = 0
-  let lastProgress = 20
+  let lastParseError: unknown
 
-  const stream = await client.chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    response_format: { type: 'json_object' },
-    max_tokens: 8000,
-    stream: true
-  })
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let fullContent = ''
+    let tokenCount = 0
+    let lastProgress = 20
+    let finishReason: string | null = null
 
-  for await (const chunk of stream) {
-    const delta = chunk.choices?.[0]?.delta?.content
-    if (delta) {
-      fullContent += delta
-      tokenCount++
+    if (attempt > 1) onProgress?.('induct', 'AI 返回内容不完整，正在自动重试...', 25, 0)
 
-      // Update progress: map 20-90% across the token range
-      const progress = Math.min(90, 20 + Math.round((tokenCount / estimatedTokens) * 70))
-      if (progress > lastProgress + 2 || tokenCount % 5 === 0) {
-        lastProgress = progress
-        onProgress?.('induct', `AI 正在归纳知识点...`, progress, tokenCount)
+    const stream = await client.chat.completions.create({
+      model,
+      messages: [
+        { role: 'system', content: `${systemPrompt}\n务必输出完整、可解析的 JSON；内容保持精炼，禁止在 JSON 前后添加说明。` },
+        { role: 'user', content: userPrompt }
+      ],
+      response_format: { type: 'json_object' },
+      ...aiOutputOptions(baseURL, model, 8000, attempt),
+      stream: true,
+      stream_options: { include_usage: true }
+    })
+
+    for await (const chunk of stream) {
+      if (chunk.usage) recordAiUsage(chunk, 'induction', reasonKey ? 'reason' : 'vision', model)
+      const choice = chunk.choices?.[0]
+      const delta = choice?.delta?.content
+      if (choice?.finish_reason) finishReason = choice.finish_reason
+      if (delta) {
+        fullContent += delta
+        tokenCount++
+
+        const progress = Math.min(90, 20 + Math.round((tokenCount / estimatedTokens) * 70))
+        if (progress > lastProgress + 2 || tokenCount % 5 === 0) {
+          lastProgress = progress
+          onProgress?.('induct', `AI 正在归纳知识点${attempt > 1 ? '（重试）' : ''}...`, progress, tokenCount)
+        }
       }
+    }
+
+    onProgress?.('induct', '正在解析归纳结果...', 92, tokenCount)
+
+    let cleaned = fullContent.trim().replace(/^\uFEFF/, '')
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '')
+    }
+
+    try {
+      if (!cleaned) throw new Error('AI 返回了空内容')
+      const result = parseValidatedAi(cleaned, inductionEnvelopeSchema, finishReason) as unknown as DailyInductionOutput
+      if (!result?.daily_note || !result?.card_operations) throw new Error('AI 返回的 JSON 缺少必要字段')
+      for (const field of ['new_cards', 'updated_cards', 'moc_updates'] as const) {
+        if (!Array.isArray(result.card_operations[field])) throw new Error(`归纳结果 ${field} 必须为数组`)
+      }
+      for (const field of ['categories_studied', 'cards_new', 'cards_updated'] as const) {
+        if (!Array.isArray(result.daily_note[field])) throw new Error(`每日笔记 ${field} 必须为数组`)
+      }
+
+      // The model may mistake a date appearing in OCR text for the note date.
+      // Keep metadata controlled by the application rather than model output.
+      result.daily_note.date = input.targetDate
+      result.daily_note.total_questions = input.todayQuestions.length
+      onProgress?.('induct', '正在生成每日笔记...', 96, tokenCount)
+      result.daily_note.full_markdown = buildDailyNoteMarkdown(result.daily_note)
+      onProgress?.('induct', '归纳完成', 100, tokenCount)
+      return result
+    } catch (err) {
+      lastParseError = err
+      logger.warn('auto_induct', 'invalid_json', `归纳结果 JSON 无效，准备${attempt < 2 ? '重试' : '结束'}`, {
+        attempt,
+        contentLength: cleaned.length,
+        finishReason,
+        error: err instanceof Error ? err.message : String(err),
+        contentTail: cleaned.slice(-200)
+      })
     }
   }
 
-  // Phase 4: Parse and finalize
-  onProgress?.('induct', '正在解析归纳结果...', 92, tokenCount)
-
-  // Clean up any markdown code fences the model might have wrapped the JSON in
-  let cleaned = fullContent.trim()
-  if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '')
-  }
-
-  const result = JSON.parse(cleaned) as DailyInductionOutput
-
-  // Build the full daily note markdown
-  onProgress?.('induct', '正在生成每日笔记...', 96, tokenCount)
-  result.daily_note.full_markdown = buildDailyNoteMarkdown(result.daily_note)
-
-  onProgress?.('induct', '归纳完成', 100, tokenCount)
-  return result
+  const detail = lastParseError instanceof Error ? lastParseError.message : String(lastParseError || '')
+  throw new Error(`AI 返回的归纳结果不完整，自动重试后仍无法解析${detail ? `（${detail}）` : ''}`)
 }
 
 /**
@@ -759,7 +1031,9 @@ function buildInductionPrompt(input: DailyInductionInput): string {
     cardByKey[key].push(card)
   }
 
-  let prompt = `今天共有 ${input.todayQuestions.length} 道已确认错题。按知识点分组如下：\n\n`
+  let prompt = `本次归纳的目标日期是 ${input.targetDate}。\n`
+  prompt += `daily_note.date 必须严格填写为 "${input.targetDate}"；题目、OCR 或复盘文字里出现的任何其他日期都只是题目内容，禁止用作归纳日期。\n`
+  prompt += `该日期共有 ${input.todayQuestions.length} 道已确认错题。按知识点分组如下：\n\n`
 
   for (const [category, questions] of Object.entries(groups)) {
     const [l1, l2, l3] = category.split(' > ')

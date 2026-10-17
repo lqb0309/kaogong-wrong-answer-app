@@ -3,6 +3,7 @@ import { writeToVault } from './obsidian'
 import { logger } from './logger'
 import { getDb } from './db'
 import fs from 'fs-extra'
+import { questionData, renderQuestionMarkdown } from './question-data'
 
 // ============ Obsidian 离线重试队列（PRD：断网缓存，恢复后自动补写） ============
 
@@ -14,7 +15,6 @@ interface VaultRetryItem {
 }
 
 const QUEUE_KEY = 'vault_retry_queue'
-const MAX_QUEUE = 200
 const MAX_ATTEMPTS = 8
 
 function readQueue(): VaultRetryItem[] {
@@ -29,17 +29,21 @@ function readQueue(): VaultRetryItem[] {
 }
 
 function writeQueue(items: VaultRetryItem[]): void {
-  writeConfig(QUEUE_KEY, JSON.stringify(items.slice(0, MAX_QUEUE)))
+  writeConfig(QUEUE_KEY, JSON.stringify(items))
 }
 
 export function enqueueVaultWrite(questionData: any, markdown: string): void {
-  const queue = readQueue()
+  const queue = readQueue().filter(item => item.questionData.id !== questionData.id)
   queue.push({ questionData, markdown, queuedAt: new Date().toISOString(), attempts: 0 })
   writeQueue(queue)
   logger.warn('retry', 'enqueue_retry', 'Vault 写入失败，已加入重试队列', {
     queueSize: queue.length,
     traceId: questionData.traceId
   })
+}
+
+export function removeVaultRetry(id: string): void {
+  writeQueue(readQueue().filter(item => item.questionData.id !== id))
 }
 
 export function queueSize(): number {
@@ -64,7 +68,12 @@ export function flushVaultQueue(): { flushed: number; failed: number } {
   const db = getDb()
 
   for (const item of queue) {
-    const result = writeToVault({ ...item.questionData, markdown: item.markdown })
+    const row = db.prepare(`SELECT questions.*,
+      (SELECT passage_text FROM question_groups WHERE id = questions.group_id) AS group_passage_text
+      FROM questions WHERE id = ? AND status = 'confirmed'`).get(item.questionData.id)
+    if (!row) continue // Deleted/skipped questions must never be resurrected.
+    const latest = questionData(row)
+    const result = writeToVault({ ...latest, markdown: renderQuestionMarkdown(latest) })
     if (result.success) {
       flushed++
       logger.info('retry', 'flush_success', `重试写入成功: ${result.vaultPath}`, null, item.questionData.traceId)
@@ -76,8 +85,8 @@ export function flushVaultQueue(): { flushed: number; failed: number } {
       }
     } else {
       item.attempts += 1
-      if (item.attempts < MAX_ATTEMPTS) remaining.push(item)
-      else {
+      remaining.push(item) // Retain failures for recovery; never silently discard work.
+      if (item.attempts >= MAX_ATTEMPTS) {
         try {
           db.prepare("UPDATE questions SET sync_status = 'failed', sync_error = ? WHERE id = ?")
             .run(`Vault 写入连续失败 ${item.attempts} 次`, item.questionData.id)

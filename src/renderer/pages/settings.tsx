@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Alert, App, Button, Card, Col, Divider, Form, Input, InputNumber, Menu, Popconfirm, Row, Segmented, Select, Slider, Space, Statistic, Switch, Tag, Typography } from 'antd'
-import { ApiOutlined, CloudOutlined, DatabaseOutlined, ExperimentOutlined, FolderOpenOutlined, ReloadOutlined, SafetyCertificateOutlined, SettingOutlined, WalletOutlined } from '@ant-design/icons'
+import { Alert, App, AutoComplete, Button, Card, Col, Divider, Form, Input, InputNumber, Menu, Popconfirm, Row, Segmented, Select, Slider, Space, Statistic, Switch, Tag, Typography } from 'antd'
+import { AppstoreOutlined, SlidersOutlined, ApiOutlined, CloudOutlined, ExperimentOutlined, FolderOpenOutlined, ReloadOutlined, SafetyCertificateOutlined, WalletOutlined } from '@/components/study-icons'
 import { useSettingsStore } from '@/stores/settings'
 import { PageHeader } from '@/components/page-header'
 
@@ -15,7 +15,8 @@ const defaults: Record<string, any> = {
   ai_pipeline_mode: 'two_stage', vision_provider: 'qwen', vision_provider_name: '通义千问', vision_base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', vision_model: 'qwen3-vl-plus',
   ai_provider: 'deepseek', ai_provider_name: 'DeepSeek', ai_base_url: 'https://api.deepseek.com', ai_model: 'deepseek-v4-pro', image_compress_threshold: 500,
   image_compress_quality: 0.7, confidence_threshold: 0.7, weakness_threshold: 5, fast_induct_error_count: 1, upload_concurrency: 5,
-  review_daily_count: 5, log_level: 'WARN', log_retention: 30, auto_classify_after_import: false, error_notify: true
+  review_daily_count: 5, log_level: 'WARN', log_retention: 30, auto_classify_after_import: false, error_notify: true,
+  plan_memory_preferences: '在职备考；工作日约 90 分钟；一天只安排行测或申论其中一类完整套题；复盘优先，做题与复盘时间 1:1 至 1:1.5；补任务替换新任务，不叠加；状态不好时主动减量，不要求每天所有模块都练。'
 }
 const defaultReflectionPrompt = `请生成一份适合个人错题复习的精炼复盘，目标是让我下次遇到同类题时能识别、解出并避开原错误。
 
@@ -55,6 +56,8 @@ export function SettingsPage() {
   const [backupLoading, setBackupLoading] = useState(false)
   const [visionModels, setVisionModels] = useState(models.qwen)
   const [reasonModels, setReasonModels] = useState(models.deepseek)
+  const [modelLoading, setModelLoading] = useState({ vision: false, reason: false })
+  const [connectionLoading, setConnectionLoading] = useState({ vision: false, reason: false })
 
   useEffect(() => { if (!loaded) load() }, [loaded, load])
   useEffect(() => { window.api.listBackups().then(setBackups).catch(() => setBackups([])) }, [])
@@ -90,25 +93,36 @@ export function SettingsPage() {
   }
   const fetchModels = async (kind: 'vision' | 'reason') => {
     const prefix = kind === 'vision' ? 'vision' : 'ai'
-    const r = await window.api.fetchModels(form.getFieldValue(`${prefix}_base_url`), form.getFieldValue(`${prefix}_api_key`) || '')
-    if (r.success && r.models?.length) { kind === 'vision' ? setVisionModels(r.models) : setReasonModels(r.models); message.success(`已获取 ${r.models.length} 个模型`) }
-    else message.error(r.error || '获取失败')
+    const baseURL = form.getFieldValue(`${prefix}_base_url`) || ''
+    if (!baseURL.trim()) return message.warning('请先填写接口地址')
+    setModelLoading(previous => ({ ...previous, [kind]: true }))
+    try {
+      const r = await window.api.fetchModels(baseURL, form.getFieldValue(`${prefix}_api_key`) || '')
+      if (baseURL !== form.getFieldValue(`${prefix}_base_url`)) return
+      if (r.success && r.models?.length) { kind === 'vision' ? setVisionModels(r.models) : setReasonModels(r.models); message.success(`已获取 ${r.models.length} 个模型，当前选择保持不变`) }
+      else message.error(r.error || '获取失败，可直接填写模型名称')
+    } catch { message.error('获取失败，请重试或直接填写模型名称') }
+    finally { setModelLoading(previous => ({ ...previous, [kind]: false })) }
   }
   const testModel = async (kind: 'vision' | 'reason') => {
     const prefix = kind === 'vision' ? 'vision' : 'ai', key = form.getFieldValue(`${prefix}_api_key`), model = form.getFieldValue(`${prefix}_model`)
     if (!key || !model) return message.warning('请先填写 API Key 和模型')
-    const r = await window.api.testConnection(form.getFieldValue(`${prefix}_base_url`), key, model)
-    message[r.success ? 'success' : 'error'](r.success ? `连接正常 · ${r.latency}ms` : r.error || '连接失败')
+    setConnectionLoading(previous => ({ ...previous, [kind]: true }))
+    try {
+      const r = await window.api.testConnection(form.getFieldValue(`${prefix}_base_url`), key, model)
+      message[r.success ? 'success' : 'error'](r.success ? `连接正常 · ${r.latency}ms` : r.error || '连接失败')
+    } catch { message.error('连接测试失败，请稍后重试') }
+    finally { setConnectionLoading(previous => ({ ...previous, [kind]: false })) }
   }
   const modelCard = (kind: 'vision' | 'reason') => {
     const vision = kind === 'vision', prefix = vision ? 'vision' : 'ai', options = vision ? visionModels : reasonModels
     return <Card title={vision ? '视觉识别' : '推理分类'} extra={<Tag color={vision ? 'blue' : 'purple'}>{vision ? '读图' : '文本'}</Tag>}>
       <Paragraph type="secondary">{vision ? '读取图片和题目文字，需要支持图片输入。' : '负责分类、反思和学习建议。'}</Paragraph>
       <Row gutter={12}><Col span={12}><Form.Item name={`${prefix}_provider`} label="服务商"><Select onChange={v => providerChange(kind, v)} options={(vision ? ['qwen', 'openai', 'custom'] : ['deepseek', 'openai', 'qwen', 'custom']).map(value => ({ value, label: value === 'custom' ? '自定义' : value }))} /></Form.Item></Col><Col span={12}><Form.Item name={`${prefix}_provider_name`} label="显示名称"><Input /></Form.Item></Col></Row>
-      <Form.Item name={`${prefix}_model`} label="模型"><Select showSearch options={options.map(value => ({ value }))} /></Form.Item>
+      <Form.Item name={`${prefix}_model`} label="模型" extra="可从清单选择，也可直接输入模型名称；拉取清单不会更改当前选择。"><AutoComplete options={options.map(value => ({ value }))} filterOption={(input, option) => String(option?.value || '').toLowerCase().includes(input.toLowerCase())} placeholder="选择或输入模型名称" /></Form.Item>
       <Form.Item name={`${prefix}_api_key`} label="API Key"><Input.Password placeholder="仅加密保存在本机" /></Form.Item>
       <Form.Item name={`${prefix}_base_url`} label="接口地址"><Input /></Form.Item>
-      <Space><Button onClick={() => testModel(kind)}>测试连接</Button><Button icon={<ReloadOutlined />} onClick={() => fetchModels(kind)}>拉取模型</Button></Space>
+      <Space><Button loading={connectionLoading[kind]} onClick={() => testModel(kind)}>测试连接</Button><Button loading={modelLoading[kind]} icon={<ReloadOutlined />} onClick={() => fetchModels(kind)}>拉取模型</Button></Space>
     </Card>
   }
 
@@ -123,12 +137,29 @@ export function SettingsPage() {
       <Col span={8}><Card><Statistic title="今日费用" prefix="$" precision={4} value={billing?.usage.today.cost || 0} /><Text type="secondary">{billing?.usage.today.calls || 0} 次调用</Text></Card></Col><Col span={8}><Card><Statistic title="本月费用" prefix="$" precision={4} value={billing?.usage.month.cost || 0} /><Text type="secondary">{billing?.usage.month.calls || 0} 次调用</Text></Card></Col><Col span={8}><Card><Statistic title="DeepSeek 余额" value={balance?.total || '--'} suffix={balance?.currency || ''} /><Text type="secondary">{billing?.balance.error || (billing?.balance.available ? '官方实时余额' : '暂不可用')}</Text></Card></Col></Row>
       <Card title="计费来源" style={{ marginTop: 12 }}><Space direction="vertical"><Space><Tag color={billing?.ccSwitch.detected ? 'success' : 'default'}>CC Switch {billing?.ccSwitch.detected ? '已连接' : '未发现'}</Tag><Text>{billing?.ccSwitch.detected ? `已加载 ${billing.ccSwitch.modelCount} 个模型价格` : '自动使用内置价格，未知价格不会影响调用'}</Text></Space><Text type="secondary">CC Switch 无需启动。本应用只读其价格库，不读取账号或密钥；显示费用为估算值。</Text></Space></Card></> }
     if (section === 'storage') return <><Title level={4}>存储与同步</Title><Card title="本地数据" style={{ marginBottom: 12 }}><Form.Item name="local_data_dir" label="错题与图片目录"><Input placeholder="留空使用默认目录" /></Form.Item></Card><Card title="EasyImage（可选）" style={{ marginBottom: 12 }}><Paragraph type="secondary">不配置时使用本地图片，不影响使用。</Paragraph><Form.Item name="easyimage_url" label="服务地址"><Input /></Form.Item><Form.Item name="easyimage_token" label="Token"><Input.Password /></Form.Item><Button onClick={async () => { const r = await window.api.testEasyImage(form.getFieldValue('easyimage_url'), form.getFieldValue('easyimage_token')); message[r.success ? 'success' : 'error'](r.success ? '连接正常' : r.error || '连接失败') }}>测试连接</Button></Card><Card title="Obsidian（可选）"><Form.Item name="obsidian_vault" label="Vault 路径"><Input placeholder="直接写 Markdown，无需插件" /></Form.Item></Card></>
-    if (section === 'learning') return <><Title level={4}>学习流程</Title><Card><Row gutter={24}><Col span={12}><Form.Item name="auto_classify_after_import" label="导入后自动分类" valuePropName="checked"><Switch /></Form.Item><Form.Item name="review_daily_count" label="每日复习卡片数"><InputNumber min={1} max={50} style={{ width: '100%' }} /></Form.Item><Form.Item name="weakness_threshold" label="弱点提醒题数"><InputNumber min={1} max={100} style={{ width: '100%' }} /></Form.Item></Col><Col span={12}><Form.Item name="confidence_threshold" label="低置信度提醒阈值"><Slider min={0} max={1} step={0.05} /></Form.Item><Form.Item name="fast_induct_error_count" label="快速入库默认错误次数"><InputNumber min={1} max={10} style={{ width: '100%' }} /></Form.Item><Form.Item name="upload_concurrency" label="批量处理并发数"><InputNumber min={1} max={8} style={{ width: '100%' }} /></Form.Item></Col></Row></Card></>
+    if (section === 'learning') return <><Title level={4}>学习流程</Title><Card><Row gutter={24}><Col span={12}><Form.Item name="auto_classify_after_import" label="导入后自动分类" valuePropName="checked"><Switch /></Form.Item><Form.Item name="review_daily_count" label="每日复习卡片数"><InputNumber min={1} max={50} style={{ width: '100%' }} /></Form.Item><Form.Item name="weakness_threshold" label="弱点提醒题数"><InputNumber min={1} max={100} style={{ width: '100%' }} /></Form.Item></Col><Col span={12}><Form.Item name="confidence_threshold" label="低置信度提醒阈值"><Slider min={0} max={1} step={0.05} /></Form.Item><Form.Item name="fast_induct_error_count" label="快速入库默认错误次数"><InputNumber min={1} max={10} style={{ width: '100%' }} /></Form.Item><Form.Item name="upload_concurrency" label="批量处理并发数"><InputNumber min={1} max={8} style={{ width: '100%' }} /></Form.Item></Col></Row></Card><Card title="AI 计划记忆" style={{ marginTop: 12 }}><Paragraph type="secondary">这里保存长期有效的个人习惯；近 14 天完成率、未完成模块、错题和超时分布由程序自动滚动归纳，不需要手动维护。</Paragraph><Form.Item name="plan_memory_preferences" label="长期偏好与限制"><Input.TextArea rows={6} placeholder="例如：在职备考，工作日最多 90 分钟；资料分析每天必练……" /></Form.Item></Card></>
     if (section === 'backup') return <><Title level={4}>备份与恢复</Title><Alert type="success" showIcon message="每次启动自动备份，保留最近 14 份；恢复前会再保存当前数据。" style={{ marginBottom: 12 }} /><Card><Space><Button type="primary" icon={<SafetyCertificateOutlined />} loading={backupLoading} onClick={async () => { setBackupLoading(true); try { const r = await window.api.createBackup(); setBackups(await window.api.listBackups()); message.success(`已创建 ${r.backup.name}`) } finally { setBackupLoading(false) } }}>立即备份</Button>{backups[0] && <Button icon={<FolderOpenOutlined />} onClick={() => window.api.openExternal(backups[0].path)}>打开目录</Button>}</Space><Divider />{backups.slice(0, 10).map(item => <div key={item.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid #f0f0f0' }}><div><Text strong>{item.name}</Text><br /><Text type="secondary">{new Date(item.createdAt).toLocaleString()} · {(item.size / 1048576).toFixed(1)} MB</Text></div><Popconfirm title="恢复这份备份？" description="应用将自动重启" onConfirm={() => window.api.restoreBackup(item.name)}><Button danger size="small">恢复</Button></Popconfirm></div>)}</Card></>
     return <><Title level={4}>高级设置</Title><Card title="图片处理" style={{ marginBottom: 12 }}><Form.Item name="image_compress_threshold" label="压缩阈值（KB）"><InputNumber min={0} max={20480} /></Form.Item><Form.Item name="image_compress_quality" label="压缩质量"><Slider min={0.1} max={1} step={0.05} /></Form.Item></Card><Card title="分类 Prompt" style={{ marginBottom: 12 }}><Form.Item name="classify_prompt"><Input.TextArea rows={7} placeholder="留空使用内置 Prompt" /></Form.Item></Card><Card title="复盘 Prompt" style={{ marginBottom: 12 }} extra={<Button size="small" onClick={() => { form.setFieldValue('reflection_prompt', defaultReflectionPrompt); message.info('已恢复内置复盘 Prompt，保存本页后生效') }}>恢复默认</Button>}><Paragraph type="secondary">下方已显示当前使用的完整复盘提示词，可以直接修改。题目分类、OCR、你的答案、正确答案与错误类型会由程序自动附加，无需重复写入。</Paragraph><Form.Item name="reflection_prompt"><Input.TextArea rows={18} /></Form.Item></Card><Card title="诊断日志"><Row gutter={12}><Col span={12}><Form.Item name="log_level" label="日志级别"><Select options={['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'].map(value => ({ value }))} /></Form.Item></Col><Col span={12}><Form.Item name="log_retention" label="保留天数"><InputNumber min={1} max={365} /></Form.Item></Col></Row><Form.Item name="error_notify" label="错误通知" valuePropName="checked"><Switch /></Form.Item></Card></>
   }
 
-  const items = [{ key: 'overview', icon: <SettingOutlined />, label: '概览' }, { key: 'ai', icon: <ApiOutlined />, label: 'AI 模型' }, { key: 'billing', icon: <WalletOutlined />, label: '费用与余额' }, { key: 'storage', icon: <CloudOutlined />, label: '存储与同步' }, { key: 'learning', icon: <ExperimentOutlined />, label: '学习流程' }, { key: 'backup', icon: <DatabaseOutlined />, label: '备份与恢复' }, { key: 'advanced', icon: <SettingOutlined />, label: '高级设置' }]
+  const items = [{ key: 'overview', icon: <AppstoreOutlined />, label: '概览' }, { key: 'ai', icon: <ApiOutlined />, label: 'AI 模型' }, { key: 'billing', icon: <WalletOutlined />, label: '费用与余额' }, { key: 'storage', icon: <CloudOutlined />, label: '存储与同步' }, { key: 'learning', icon: <ExperimentOutlined />, label: '学习流程' }, { key: 'backup', icon: <SafetyCertificateOutlined />, label: '备份与恢复' }, { key: 'advanced', icon: <SlidersOutlined />, label: '高级设置' }]
   const showSave = !['overview', 'billing', 'backup'].includes(section)
-  return <div className="settings-page" style={{ maxWidth: 1120 }}><PageHeader title="设置" subtitle="按任务分区管理，关键状态一眼可见" /><Form form={form} layout="vertical"><Row gutter={20} align="top"><Col xs={24} md={6} lg={5}><Title level={4} className="settings-column-title">设置分区</Title><Card styles={{ body: { padding: 8 } }} style={{ position: 'sticky', top: 16 }}><Menu mode="inline" selectedKeys={[section]} items={items} onClick={({ key }) => setSection(key as Section)} /></Card></Col><Col xs={24} md={18} lg={19}><div className="settings-panel" style={{ minHeight: 540 }}>{render()}</div>{showSave && <Card style={{ marginTop: 16 }} styles={{ body: { display: 'flex', justifyContent: 'flex-end' } }}><Button type="primary" size="large" loading={saving} onClick={save}>保存本页设置</Button></Card>}</Col></Row></Form></div>
+  return <div className="settings-page">
+    <PageHeader title="设置" subtitle="模型、学习习惯和数据管理，各自在这里调整" />
+    <Form form={form} layout="vertical" className="settings-form">
+      <div className="settings-grid">
+        <aside className="settings-navigation" aria-label="设置分区">
+          <Menu mode="inline" selectedKeys={[section]} items={items} onClick={({ key }) => setSection(key as Section)} />
+          <div className="settings-navigation-hint">配置保存在本机<br />切换分区不会清空输入</div>
+        </aside>
+        <section className="settings-main">
+          <div className="settings-panel" key={section}>{render()}</div>
+          {showSave && <div className="settings-save-bar">
+            <Text type="secondary">修改后保存，即可用于下一次处理</Text>
+            <Button type="primary" loading={saving} onClick={save}>保存设置</Button>
+          </div>}
+        </section>
+      </div>
+    </Form>
+  </div>
 }

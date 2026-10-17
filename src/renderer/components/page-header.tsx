@@ -13,23 +13,16 @@ interface PageHeaderProps {
  */
 export function PageHeader({ title, subtitle, extra }: PageHeaderProps) {
   return (
-    <div style={{
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'flex-start',
-      marginBottom: 16,
-      flexWrap: 'wrap',
-      gap: 8
-    }}>
-      <div style={{ minWidth: 0 }}>
-        <Typography.Title level={3} style={{ margin: 0 }}>{title}</Typography.Title>
+    <header className="page-header">
+      <div className="page-header-heading">
+        <Typography.Title level={3} className="page-header-title">{title}</Typography.Title>
         {subtitle && (
-          <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 2 }}>
+          <Typography.Text type="secondary" className="page-header-subtitle">
             {subtitle}
           </Typography.Text>
         )}
       </div>
-      {extra && <Space wrap>{extra}</Space>}
-    </div>
+      {extra && <Space wrap className="page-header-actions">{extra}</Space>}
+    </header>
   )
 }

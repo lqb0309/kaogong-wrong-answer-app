@@ -8,8 +8,17 @@ import { registerIpcHandlers, runAutoInductForRecentDays } from './ipc-handlers'
 import { ensureTodayPlan } from './daily-plan'
 import { localDateKey } from './date-utils'
 import { createDatabaseBackup } from './backup'
+import { startFenbiAnalysisQueue } from './fenbi-import'
+import { refreshStudyCalendar } from './study-calendar'
 
 let mainWindow: BrowserWindow | null = null
+// Explicit development-only profile: never share the running installed app's DB,
+// login session, automatic AI queue or Vault writes while testing UI changes.
+const testProfile = !app.isPackaged ? process.env.WRONG_ANSWER_TEST_PROFILE : undefined
+if (testProfile) {
+  if (!require('path').isAbsolute(testProfile)) throw new Error('测试数据目录必须是绝对路径')
+  app.setPath('userData', testProfile)
+}
 
 // 主进程全局异常上报（PRD 埋点：未捕获异常 / 应用级崩溃）
 process.on('uncaughtException', (err) => {
@@ -29,7 +38,7 @@ function createWindow(): void {
     height: 800,
     minWidth: 960,
     minHeight: 640,
-    title: '小乖的考公错题屋',
+    title: testProfile ? '小乖的考公错题屋 · 测试（题库副本）' : '小乖的考公错题屋',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -40,7 +49,9 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show()
+    if (testProfile) console.info('[test] ready-to-show: 复习与导出（独立题库副本）')
   })
+  if (testProfile) mainWindow.on('page-title-updated', event => event.preventDefault())
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
@@ -49,7 +60,7 @@ function createWindow(): void {
 
   const isDev = !app.isPackaged
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'].replace(/\/+$/, '') + (testProfile ? '/test-builder' : ''))
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
@@ -63,6 +74,16 @@ app.whenReady().then(() => {
   logger.info('system', 'app_start', '小乖的考公错题屋启动', { version: app.getVersion() })
   registerIpcHandlers()
   createWindow()
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+
+  if (testProfile) return
+  void refreshStudyCalendar().catch(error => logger.warn('daily_plan', 'calendar_refresh_failed', String(error)))
+
+  // Resume durable Fenbi AI work that may have been interrupted by an app exit.
+  setTimeout(() => startFenbiAnalysisQueue(), 1200)
 
   // Keep a small rolling set of recoverable snapshots. Failure must never block startup.
   createDatabaseBackup('startup').catch(err => logger.warn('storage', 'backup_failed', err?.message || String(err)))
@@ -99,9 +120,6 @@ app.whenReady().then(() => {
     ensureTodayPlan().catch(err => logger.error('daily_plan', 'startup_generate_failed', err?.message || String(err)))
   }, 500)
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
-  })
 })
 
 app.on('window-all-closed', () => {

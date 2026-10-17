@@ -1,0 +1,5 @@
+{
+  "name": "wrong-answer-tauri-lab", "version": "0.1.0", "private": true,
+  "scripts": { "prepare:parser": "node ../scripts/prepare-tauri.cjs", "dev": "npm run prepare:parser && tauri dev", "build": "npm run prepare:parser && tauri build --bundles app", "test:rust": "npm run prepare:parser && cargo test --manifest-path src-tauri/Cargo.toml" },
+  "devDependencies": { "@tauri-apps/cli": "2.12.3" }
+}

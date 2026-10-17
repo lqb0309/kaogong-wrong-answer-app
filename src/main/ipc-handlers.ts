@@ -3,13 +3,21 @@ import { getDb } from './db'
 import { logger } from './logger'
 import { readConfig, writeConfig, getAllConfig } from './config'
 import { encryptToken, decryptToken } from './safe-storage'
-import { classifyImage, getAiSuggestion, generateReflection, generateDailyInduction } from './ai'
+import { fetchModelCatalog } from './model-catalog'
+import { classifyImage, analyzeMaterialGroup, getAiSuggestion, generateReflection, generateDailyInduction } from './ai'
 import { writeToVault, vaultOnline, reorganizeVault } from './obsidian'
-import { storeImage, saveMarkdown, buildMarkdown, getLocalDataDir } from './storage'
+import { storeImage, saveMarkdown, syncQuestionNotes, loadQuestionData, repairQuestionNotes, getLocalDataDir } from './storage'
 import { generateTraceId } from './utils'
 import { scanExistingCards, writeInductionResults, readCardContent, scanDailyNotes, readDailyNote, bumpCardError, findQuestionsForCard, findCardPathsForQuestion, parseCategoryFromPath, getReviewQueueCards } from './knowledge-cards'
 import { fetchQuestionsForTest, generatePdf } from './pdf-generator'
-import { queueSize, flushVaultQueue } from './retry-queue'
+import { queueSize, flushVaultQueue, removeVaultRetry } from './retry-queue'
+import { readImageBuffer } from './image-assets'
+import { deleteQueueItems } from './queue-deletion'
+import { answerResultSql, timeStatusSql, performanceFilters } from './question-filters'
+import { createReviewBatch, getReviewBatch, listReviewBatches, completeReviewBatch, exportReviewBatch } from './review-center'
+import { scheduleCardReview, type RecallRating } from './card-scheduler'
+import { questionData, parseJson, questionFileName } from './question-data'
+import { resolveInside } from './path-safety'
 import { ensureTodayPlan, updatePlanTask, submitPlanFeedback, getPlanHistory, regenerateTodayPlan, getExamInfo, getExamPhase, getStoredForwardPlan, generateForwardPlan, completePlanTaskForActivity } from './daily-plan'
 import fs from 'fs-extra'
 import path from 'path'
@@ -19,8 +27,10 @@ import { createDatabaseBackup, listDatabaseBackups, restoreDatabaseBackup } from
 import dayjs from 'dayjs'
 import { getAiUsageSummary } from './ai-usage'
 import { getBillingOverview } from './billing'
+import { openFenbiImporter, previewFenbiReport, importFenbiQuestions, syncFenbiToday, syncFenbiCurrentReport, syncFenbiWrongQuestions, getFenbiTodaySummary, repairStoredFenbiCategories, fenbiAnalysisStatus, controlFenbiAnalysis, getFenbiGroupEfficiencyRecords } from './fenbi-import'
 
 export function registerIpcHandlers(): void {
+  repairStoredFenbiCategories()
   // ============ Config ============
   ipcMain.handle('config:get', (_e, key: string, decrypt: boolean) => {
     const value = readConfig(key)
@@ -55,6 +65,26 @@ export function registerIpcHandlers(): void {
   })
   ipcMain.handle('ai:usage', (_e, days?: number) => getAiUsageSummary(days))
   ipcMain.handle('billing:overview', () => getBillingOverview())
+  let fenbiBusy = false
+  const withFenbi = async <T>(work: () => Promise<T>): Promise<T> => {
+    if (fenbiBusy) throw new Error('粉笔正在同步或读取报告，请等待当前任务完成')
+    fenbiBusy = true
+    try { return await work() }
+    catch (error: any) {
+      logger.warn('fenbi', 'operation_failed', error?.message || '粉笔同步失败')
+      throw error
+    } finally { fenbiBusy = false }
+  }
+  ipcMain.handle('fenbi:open', () => withFenbi(() => openFenbiImporter()))
+  ipcMain.handle('fenbi:preview', () => withFenbi(() => previewFenbiReport()))
+  ipcMain.handle('fenbi:import', (_e, params: any) => withFenbi(() => importFenbiQuestions(params)))
+  ipcMain.handle('fenbi:syncToday', () => withFenbi(() => syncFenbiToday()))
+  ipcMain.handle('fenbi:syncCurrent', () => withFenbi(() => syncFenbiCurrentReport()))
+  ipcMain.handle('fenbi:syncWrongQuestions', (_e, params: any) => withFenbi(() => syncFenbiWrongQuestions(params || {})))
+  ipcMain.handle('fenbi:todaySummary', () => getFenbiTodaySummary())
+  ipcMain.handle('fenbi:analysisStatus', () => fenbiAnalysisStatus())
+  ipcMain.handle('fenbi:groupEfficiency', () => getFenbiGroupEfficiencyRecords())
+  ipcMain.handle('fenbi:analysisControl', (_e, action: 'pause' | 'resume' | 'retry-failed') => controlFenbiAnalysis(action))
 
   // 渲染进程异常上报（PRD 埋点：未捕获异常）
   ipcMain.handle('log:rendererError', (_e, errorText: string) => {
@@ -114,27 +144,24 @@ export function registerIpcHandlers(): void {
   }) => {
     try {
       // 1. Download the original image
-      const resp = await fetch(params.imageUrl, { signal: AbortSignal.timeout(15000) })
-      if (!resp.ok) return { success: false, error: `下载失败 HTTP ${resp.status}` }
-      const imgBuf = Buffer.from(await resp.arrayBuffer())
+      const { buffer: originalBuffer } = await readImageBuffer(params.imageUrl)
+      const sharp = require('sharp')
+      const imgBuf = params.rotation ? await sharp(originalBuffer).rotate(params.rotation).toBuffer() : originalBuffer
 
       // 2. Apply crop/rotation with sharp
-      const sharp = require('sharp')
       const metadata = await sharp(imgBuf).metadata()
       const imgW = metadata.width || 0
       const imgH = metadata.height || 0
 
       let pipeline = sharp(imgBuf)
 
-      if (params.rotation && params.rotation !== 0) {
-        pipeline = pipeline.rotate(params.rotation)
-      }
       if (params.crop && params.crop.width > 0 && params.crop.height > 0) {
         // Clamp crop to image bounds
         const left = Math.max(0, Math.round(params.crop.x))
         const top = Math.max(0, Math.round(params.crop.y))
         const width = Math.min(Math.round(params.crop.width), imgW - left)
         const height = Math.min(Math.round(params.crop.height), imgH - top)
+        if (width <= 0 || height <= 0) throw new Error('裁剪区域超出图片范围')
         logger.info('image', 'crop_apply', `裁剪: ${left},${top} ${width}×${height} (原图 ${imgW}×${imgH})`)
         pipeline = pipeline.extract({ left, top, width, height })
       } else {
@@ -159,10 +186,7 @@ export function registerIpcHandlers(): void {
   // Download remote image as data URL (main process, no CORS)
   ipcMain.handle('image:download', async (_e, url: string) => {
     try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(15000) })
-      if (!resp.ok) return { success: false, error: `HTTP ${resp.status}` }
-      const buf = Buffer.from(await resp.arrayBuffer())
-      const contentType = resp.headers.get('content-type') || 'image/png'
+      const { buffer: buf, mime: contentType } = await readImageBuffer(url)
       return { success: true, dataUrl: `data:${contentType};base64,${buf.toString('base64')}` }
     } catch (err: any) {
       return { success: false, error: err.message }
@@ -170,14 +194,9 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('file:readImage', async (_e, filePath: string) => {
-    // Handle data URLs directly (for remote images fetched in renderer)
-    if (filePath.startsWith('data:')) return filePath
-    // Strip file:// prefix
-    const cleanPath = filePath.startsWith('file://') ? filePath.slice(7) : filePath
-    const buf = fs.readFileSync(cleanPath)
-    const ext = cleanPath.split('.').pop()?.toLowerCase() || 'jpg'
-    const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg'
-    return `data:${mime};base64,${buf.toString('base64')}`
+    if (filePath.startsWith('data:image/')) return filePath
+    const { buffer, mime } = await readImageBuffer(filePath)
+    return `data:${mime};base64,${buffer.toString('base64')}`
   })
 
   // EasyImage test
@@ -316,6 +335,103 @@ export function registerIpcHandlers(): void {
       return { success: false, error: err.message }
     }
   })
+
+  ipcMain.handle('materialGroup:create', async (
+    e,
+    images: Array<{ url: string; localAbsPath?: string }>,
+    sourceQuestionIds?: string[]
+  ) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const traceId = generateTraceId()
+    const onProgress = (stage: string, message: string) => {
+      if (win && !win.isDestroyed()) win.webContents.send('ai:progress', { traceId, stage, message, ts: Date.now() })
+    }
+    try {
+      const db = getDb()
+      let resolvedImages = Array.isArray(images) ? images : []
+      const sourceIds = Array.isArray(sourceQuestionIds) ? Array.from(new Set(sourceQuestionIds)) : []
+      if (resolvedImages.length === 0 && sourceIds.length > 0) {
+        const placeholders = sourceIds.map(() => '?').join(',')
+        const rows = db.prepare(`SELECT id, image_url, local_image_path FROM questions WHERE id IN (${placeholders})`).all(...sourceIds) as Array<{ id: string; image_url: string; local_image_path?: string }>
+        const byId = new Map(rows.map(row => [row.id, row]))
+        resolvedImages = sourceIds.map(id => byId.get(id)).filter((row): row is NonNullable<typeof row> => !!row)
+          .map(row => ({ url: row.image_url, localAbsPath: row.local_image_path }))
+      }
+      if (resolvedImages.length === 0) throw new Error('请至少选择一张资料截图')
+      // Prefer the locally persisted original when available. Some vision providers
+      // reject otherwise valid image-host URLs (for example URLs using a custom
+      // port), while a local file is converted to a data URL by `toImageUrl`.
+      // Keep the public URL below for renderer/PDF display only.
+      const analysisImages = resolvedImages.map(image => {
+        if (image.localAbsPath && fs.existsSync(image.localAbsPath)) {
+          return `file://${image.localAbsPath}`
+        }
+        return image.url
+      })
+      const analysis = await analyzeMaterialGroup(analysisImages, traceId, onProgress)
+      // Renderer pages can run from an http:// origin in development, where direct
+      // file:// access is blocked. Keep the accessible stored URL for UI/PDF use.
+      const materialRefs = resolvedImages.map(image => image.url)
+      const groupId = `material-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
+      db.prepare(`INSERT INTO question_groups
+        (id, title, passage_image_url, passage_text, group_type, created_at, material_images)
+        VALUES (?, ?, ?, ?, 'material', ?, ?)`
+      ).run(groupId, analysis.title || '资料分析题组', materialRefs[0], analysis.passage_text || '', new Date().toISOString(), JSON.stringify(materialRefs))
+
+      const candidates = analysis.questions.filter(question => question.is_wrong !== false)
+      const createdIds: string[] = []
+      for (const question of candidates) {
+        const indexes = question.material_image_indexes?.length
+          ? question.material_image_indexes
+          : resolvedImages.map((_, index) => index + 1)
+        const dependencyUrls = indexes.map(index => materialRefs[index - 1]).filter(Boolean)
+        const primaryImage = resolvedImages[(indexes[0] || 1) - 1] || resolvedImages[0]
+        const id = `q-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
+        const answerText = [
+          question.ocr_text,
+          question.correct_answer ? `正确答案：${question.correct_answer}` : '',
+          question.user_answer ? `你的答案：${question.user_answer}` : ''
+        ].filter(Boolean).join('\n')
+        await saveMarkdown({
+          id,
+          imageUrl: primaryImage.url,
+          localAbsPath: primaryImage.localAbsPath,
+          level1: question.level1 || '资料分析',
+          level2: question.level2 || '资料分析',
+          level3: question.level3 || null,
+          confidence: question.confidence || 0,
+          ocrText: answerText,
+          reasoning: question.is_wrong === null ? '答案识别不完整，请在待确认页面核对' : '资料题组自动拆题',
+          reflection: question.reflection || '',
+          errorType: question.error_type || '',
+          hasGraphics: true,
+          status: 'classified',
+          errorCount: 1,
+          traceId
+        })
+        db.prepare(`UPDATE questions SET group_id = ?, question_number = ?, material_image_ids = ? WHERE id = ?`)
+          .run(groupId, question.question_number || '', JSON.stringify(dependencyUrls), id)
+        createdIds.push(id)
+      }
+      if (sourceIds.length > 0) {
+        const placeholders = sourceIds.map(() => '?').join(',')
+        db.prepare(`DELETE FROM questions WHERE id IN (${placeholders}) AND status IN ('pending', 'classified')`).run(...sourceIds)
+      }
+      logger.info('ai', 'material_group_created', `资料题组识别完成：${analysis.questions.length} 题，${createdIds.length} 题待确认`, { groupId }, traceId)
+      return {
+        success: true,
+        groupId,
+        title: analysis.title,
+        totalQuestions: analysis.questions.length,
+        wrongQuestions: analysis.questions.filter(question => question.is_wrong === true).length,
+        uncertainQuestions: analysis.questions.filter(question => question.is_wrong === null).length,
+        createdIds
+      }
+    } catch (err: any) {
+      logger.error('ai', 'material_group_failed', err.message, null, traceId)
+      return { success: false, error: err.message, createdIds: [] }
+    }
+  })
   ipcMain.handle('ai:test', async (_e, baseURL: string, apiKey: string, model: string) => {
     try {
       const OpenAI = require('openai')
@@ -333,24 +449,9 @@ export function registerIpcHandlers(): void {
     }
   })
   ipcMain.handle('ai:models', async (_e, baseURL: string, apiKey: string) => {
-    try {
-      const OpenAI = require('openai')
-      const urlsToTry = [baseURL]
-      const cleanURL = baseURL.replace(/\/+$/, '')
-      if (!cleanURL.endsWith('/v1')) urlsToTry.push(`${cleanURL}/v1`)
-      for (const url of urlsToTry) {
-        try {
-          const client = new OpenAI({ apiKey: apiKey || 'no-key', baseURL: url, maxRetries: 1, timeout: 8000 })
-          const list = await client.models.list()
-          const models = list.data.map((m: any) => m.id).filter((id: string) => {
-            const lower = id.toLowerCase()
-            return !lower.includes('embedding') && !lower.includes('moderation') && !lower.includes('dall-e') && !lower.includes('tts') && !lower.includes('whisper') && !lower.includes('audio') && !lower.startsWith('text-') && !lower.startsWith('code-')
-          }).sort()
-          if (models.length > 0) return { success: true, models }
-        } catch { }
-      }
-      return { success: false, error: '该服务商不支持 /models 端点' }
-    } catch { return { success: false, error: 'API 调用失败' } }
+    const result = await fetchModelCatalog(baseURL, apiKey)
+    if (!result.success) logger.warn('ai', 'model_catalog_failed', result.error || '模型清单获取失败')
+    return result
   })
   ipcMain.handle('ai:suggest', async (_e, statsData: any) => {
     try {
@@ -358,13 +459,25 @@ export function registerIpcHandlers(): void {
       return { success: true, suggestion }
     } catch (err: any) { return { success: false, error: err.message } }
   })
-  ipcMain.handle('ai:reflect', async (e, params: { level1: string; level2?: string; level3?: string | null; ocrText: string; errorType?: string; traceId?: string }) => {
+  ipcMain.handle('ai:reflect', async (e, params: { level1: string; level2?: string; level3?: string | null; ocrText: string; errorType?: string; traceId?: string; officialAnalysis?: string; correctAnswer?: string; userAnswer?: string; answerTime?: string; correctRate?: string; difficulty?: number | null; questionId?: string; materialText?: string; imageUrls?: string[] }) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     const onProgress = (stage: string, message: string) => {
       if (win && !win.isDestroyed()) win.webContents.send('ai:progress', { traceId: params.traceId || 'reflect', stage, message, ts: Date.now() })
     }
     try {
-      const reflection = await generateReflection(params, onProgress)
+      const row = params.questionId ? loadQuestionData(params.questionId) : undefined
+      const answer = parseJson<any>(row?.originalAnswer, {})
+      const context = row ? {
+        ...params, ...row,
+        officialAnalysis: row.originalAnalysis,
+        correctAnswer: answer.correct, userAnswer: answer.user,
+        answerTime: answer.answerTime, correctRate: answer.correctRate, difficulty: answer.reportDifficulty,
+        timingBasis: answer.timingBasis, groupActualSeconds: answer.groupActualSeconds,
+        groupTargetSeconds: answer.groupTargetSeconds, groupGraceSeconds: answer.groupGraceSeconds,
+        materialText: row.materialText,
+        imageUrls: [...parseJson<string[]>(row.material_image_ids, []), ...parseJson<string[]>(row.question_images, []), ...Object.values(parseJson<Record<string, string[]>>(row.option_images, {})).filter(Array.isArray).flat()]
+      } : params
+      const reflection = await generateReflection(context, onProgress)
       return { success: true, reflection }
     } catch (err: any) { return { success: false, error: err.message } }
   })
@@ -394,7 +507,7 @@ export function registerIpcHandlers(): void {
     const classifiedCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'classified'")
     const confirmedCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'confirmed'")
     const today = localDateKey()
-    const todayCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'confirmed' AND date(confirmed_at) = ?", today)
+    const todayCount = count("SELECT COUNT(*) as c FROM questions WHERE status = 'confirmed' AND date(confirmed_at, '+8 hours') = ?", today)
     const days = db.prepare('SELECT date FROM login_days ORDER BY date DESC').all() as { date: string }[]
     let streak = 0
     const now = new Date()
@@ -410,21 +523,26 @@ export function registerIpcHandlers(): void {
   // 手动触发重试队列刷新
   ipcMain.handle('retry:flush', () => flushVaultQueue())
 
+  ipcMain.handle('obsidian:repairNotes', () => repairQuestionNotes())
   ipcMain.handle('obsidian:sync', async () => {
     const vaultRoot = readConfig('obsidian_vault') || ''
     if (!vaultRoot) return { deleted: 0, message: '未配置 Obsidian Vault' }
     const db = getDb()
-    const questions = db.prepare("SELECT id, obsidian_path FROM questions WHERE obsidian_path IS NOT NULL AND obsidian_path != ''").all() as any[]
+    const questions = db.prepare("SELECT id, obsidian_path FROM questions WHERE status = 'confirmed'").all() as any[]
     let deleted = 0
     for (const q of questions) {
-      const fullPath = `${vaultRoot}/${q.obsidian_path}`
-      if (!fs.existsSync(fullPath)) {
+      let present = false
+      try { present = !!q.obsidian_path && fs.existsSync(resolveInside(vaultRoot, q.obsidian_path)) } catch { /* invalid legacy path */ }
+      if (!present) {
         db.prepare("UPDATE questions SET sync_status = 'missing', sync_error = ? WHERE id = ?")
           .run('Vault 中未找到对应笔记；数据库记录已保留', q.id)
         deleted++
       }
     }
-    return { deleted: 0, missing: deleted, message: `校验完成：发现 ${deleted} 条缺失笔记，数据库记录均已保留` }
+    const repairable = questions.filter(q => {
+      try { return !q.obsidian_path || path.basename(q.obsidian_path) !== questionFileName(q.id) || !fs.existsSync(resolveInside(vaultRoot, q.obsidian_path)) } catch { return true }
+    }).length
+    return { deleted: 0, missing: deleted, repairable, message: `校验完成：发现 ${deleted} 条缺失笔记，数据库记录均已保留` }
   })
   ipcMain.handle('obsidian:write', async (_e, questionData: any) => saveMarkdown(questionData))
   ipcMain.handle('obsidian:check', async () => vaultOnline())
@@ -433,13 +551,30 @@ export function registerIpcHandlers(): void {
   // Questions
   ipcMain.handle('questions:list', (_e, params: any) => {
     const db = getDb()
-    const { page = 1, pageSize = 20, level1, level2, level3, search, status = 'confirmed', sortBy = 'created_at', sortOrder = 'desc' } = params || {}
+    const { page: rawPage = 1, pageSize: rawPageSize = 20, level1, level2, level3, weaknessType, search, status = 'confirmed', sortBy = 'created_at', sortOrder = 'desc' } = params || {}
+    const page = Math.max(1, Math.floor(Number(rawPage) || 1))
+    const pageSize = Math.min(1000, Math.max(1, Math.floor(Number(rawPageSize) || 20)))
     const conditions: string[] = []
     const values: any[] = []
-    if (status && status !== 'all') { conditions.push('status = ?'); values.push(status) }
+    if (status === 'queue') conditions.push("status != 'confirmed'")
+    else if (status && status !== 'all') { conditions.push('status = ?'); values.push(status) }
     if (level1) { conditions.push('level1 = ?'); values.push(level1) }
     if (level2) { conditions.push('level2 = ?'); values.push(level2) }
     if (level3) { conditions.push('level3 = ?'); values.push(level3) }
+    const performance = performanceFilters(params || {})
+    conditions.push(...performance.conditions)
+    values.push(...performance.values)
+    for (const field of ['since', 'until'] as const) if (params?.[field]) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(params[field])) throw new Error('日期筛选无效')
+      conditions.push(`date(COALESCE(confirmed_at, created_at), '+8 hours') ${field === 'since' ? '>=' : '<='} ?`)
+      values.push(params[field])
+    }
+    if (weaknessType === '__unmarked__') {
+      conditions.push("COALESCE(NULLIF(error_type, ''), CASE WHEN json_valid(original_answer) THEN NULLIF(json_extract(original_answer, '$.weaknessType'), '') END, '') = ''")
+    } else if (weaknessType) {
+      conditions.push("COALESCE(NULLIF(error_type, ''), CASE WHEN json_valid(original_answer) THEN NULLIF(json_extract(original_answer, '$.weaknessType'), '') END, CASE WHEN json_valid(original_answer) AND json_extract(original_answer, '$.correct') != json_extract(original_answer, '$.user') THEN '结果错误' END, '') = ?")
+      values.push(weaknessType)
+    }
     if (search) {
       const rawSearch = String(search).trim()
       const terms = rawSearch.split(/\s+/).filter(Boolean)
@@ -458,22 +593,133 @@ export function registerIpcHandlers(): void {
     const offset = (page - 1) * pageSize
     const sortCol = ['created_at', 'confidence', 'error_count', 'level1'].includes(sortBy) ? sortBy : 'created_at'
     const sortDir = sortOrder === 'asc' ? 'ASC' : 'DESC'
-    const items = db.prepare(`SELECT id, image_url, level1, level2, level3, confidence, ocr_text, reasoning, status, error_count, source, obsidian_path, local_image_path, reflection, error_type, group_id, has_graphics, graphic_image_path, match_type, ai_raw_level1, ai_raw_level2, ai_raw_level3, trace_id, created_at, confirmed_at FROM questions${whereClause} ORDER BY ${sortCol} ${sortDir} LIMIT ? OFFSET ?`).all(...values, pageSize, offset)
+    const items = db.prepare(`SELECT id, image_url, level1, level2, level3, confidence, ocr_text, reasoning, status, error_count, source, obsidian_path, local_image_path, reflection, error_type, group_id, has_graphics, graphic_image_path, analysis_status, analysis_error, question_number, material_image_ids, question_images, option_images, original_analysis, original_answer, match_type, ai_raw_level1, ai_raw_level2, ai_raw_level3, trace_id, created_at, confirmed_at,
+      ${answerResultSql} AS answer_result, ${timeStatusSql} AS time_status,
+      (SELECT title FROM question_groups WHERE id = questions.group_id) AS group_title,
+      (SELECT passage_text FROM question_groups WHERE id = questions.group_id) AS group_passage_text,
+      (SELECT material_images FROM question_groups WHERE id = questions.group_id) AS group_material_images
+      FROM questions${whereClause} ORDER BY ${sortCol} ${sortDir}, id ${sortDir} LIMIT ? OFFSET ?`).all(...values, pageSize, offset)
     return { items, total }
   })
   ipcMain.handle('questions:get', (_e, id: string) => getDb().prepare('SELECT * FROM questions WHERE id = ?').get(id) || null)
-  ipcMain.handle('questions:delete', (_e, id: string) => {
+  ipcMain.handle('questions:groupMembers', (_e, groupId: string) => {
+    if (!groupId) return []
+    return getDb().prepare(`SELECT questions.*,
+      (SELECT title FROM question_groups WHERE id = questions.group_id) AS group_title,
+      (SELECT passage_text FROM question_groups WHERE id = questions.group_id) AS group_passage_text,
+      (SELECT material_images FROM question_groups WHERE id = questions.group_id) AS group_material_images
+      FROM questions WHERE group_id = ? AND status = 'confirmed'
+      ORDER BY CAST(question_number AS INTEGER), created_at`).all(groupId)
+  })
+  ipcMain.handle('speedTraining:questions', (_e, params: any) => {
+    const db = getDb()
+    const count = Math.min(50, Math.max(1, Number(params?.count || 5)))
+    const performance = performanceFilters({ answerResult: params?.answerResult, timeStatus: 'overtime' })
+    const conditions = ["status = 'confirmed'", ...performance.conditions]
+    const values: any[] = [...performance.values]
+    if (params?.level1) { conditions.push('level1 = ?'); values.push(params.level1) }
+    if (params?.level2) { conditions.push('level2 = ?'); values.push(params.level2) }
+    if (params?.level3) { conditions.push('level3 = ?'); values.push(params.level3) }
+    const rows = db.prepare(`SELECT questions.*,
+      (SELECT passage_text FROM question_groups WHERE id = questions.group_id) AS group_passage_text,
+      (SELECT material_images FROM question_groups WHERE id = questions.group_id) AS group_material_images
+      FROM questions WHERE ${conditions.join(' AND ')}`).all(...values) as any[]
+    const attempts = db.prepare('SELECT is_correct, is_on_time, elapsed_seconds, created_at FROM speed_training_attempts WHERE question_id = ? ORDER BY id DESC LIMIT 2')
+    const decorated = rows.map(question => {
+      const recent = attempts.all(question.id) as any[]
+      const graduated = recent.length >= 2 && recent.every(item => item.is_correct && item.is_on_time)
+      let original: any = {}
+      try { original = JSON.parse(question.original_answer || '{}') } catch { /* ignore */ }
+      return { ...question, speed_recent: recent, speed_graduated: graduated, original_overtime: Number(original.overtimeSeconds || 0) }
+    }).filter(question => params?.scope === 'all' || !question.speed_graduated)
+    if (params?.pickMode === 'random') decorated.sort(() => Math.random() - 0.5)
+    else if (params?.pickMode === 'slowest') decorated.sort((a, b) => b.original_overtime - a.original_overtime)
+    else decorated.sort((a, b) => Number(a.speed_graduated) - Number(b.speed_graduated) || a.speed_recent.length - b.speed_recent.length || b.original_overtime - a.original_overtime)
+    return { items: decorated.slice(0, count), available: decorated.length }
+  })
+  ipcMain.handle('speedTraining:record', (_e, params: any) => {
+    const db = getDb()
+    const question = db.prepare("SELECT original_answer FROM questions WHERE id = ? AND status = 'confirmed'").get(params.questionId) as any
+    const correctAnswer = parseJson<any>(question?.original_answer, {}).correct
+    if (!correctAnswer || !params.selectedAnswer) throw new Error('题目或可靠答案不存在，未记录成绩')
+    params.correctAnswer = correctAnswer
+    if (!Number.isFinite(Number(params.elapsedSeconds)) || Number(params.elapsedSeconds) < 0 || !Number.isFinite(Number(params.targetSeconds)) || Number(params.targetSeconds) <= 0) throw new Error('训练时间无效')
+    const isCorrect = String(params.selectedAnswer) === String(correctAnswer)
+    const isOnTime = Number(params.elapsedSeconds) <= Number(params.targetSeconds)
+    db.prepare(`INSERT INTO speed_training_attempts
+      (question_id, selected_answer, correct_answer, elapsed_seconds, target_seconds, is_correct, is_on_time, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(params.questionId, params.selectedAnswer || '', params.correctAnswer || '', Math.max(0, Number(params.elapsedSeconds) || 0), Math.max(1, Number(params.targetSeconds) || 90), isCorrect ? 1 : 0, isOnTime ? 1 : 0, new Date().toISOString())
+    const recent = db.prepare('SELECT is_correct, is_on_time FROM speed_training_attempts WHERE question_id = ? ORDER BY id DESC LIMIT 2').all(params.questionId) as any[]
+    const consecutivePasses = recent.findIndex(item => !item.is_correct || !item.is_on_time) < 0 ? recent.length : recent.findIndex(item => !item.is_correct || !item.is_on_time)
+    return { success: true, achieved: isCorrect && isOnTime, consecutivePasses, graduated: consecutivePasses >= 2 }
+  })
+  ipcMain.handle('speedTraining:recordSession', (_e, params: any) => {
+    const db = getDb()
+    const answers = Array.isArray(params?.answers) ? params.answers : []
+    if (!answers.length) throw new Error('答题卡为空')
+    if (new Set(answers.map((answer: any) => answer.questionId)).size !== answers.length) throw new Error('答题卡含重复题目')
+    for (const answer of answers) {
+      const question = db.prepare("SELECT original_answer FROM questions WHERE id = ? AND status = 'confirmed'").get(answer.questionId) as any
+      const correct = parseJson<any>(question?.original_answer, {}).correct
+      if (!correct || !answer.selectedAnswer) throw new Error('答题卡有缺失或已删除的题目，未记录成绩')
+      answer.correctAnswer = correct
+    }
+    if (!Number.isFinite(Number(params.elapsedSeconds)) || Number(params.elapsedSeconds) < 0 || !Number.isFinite(Number(params.limitSeconds)) || Number(params.limitSeconds) <= 0) throw new Error('训练时间无效')
+    const elapsedSeconds = Math.max(0, Number(params.elapsedSeconds) || 0)
+    const limitSeconds = Math.max(1, Number(params.limitSeconds) || 1)
+    const correctCount = answers.filter((item: any) => String(item.selectedAnswer) === String(item.correctAnswer)).length
+    const accuracy = correctCount / answers.length
+    const onTime = elapsedSeconds <= limitSeconds
+    const achieved = onTime && accuracy * 100 >= Math.min(100, Math.max(0, Number(params.accuracyTarget ?? 80)))
+    const now = new Date().toISOString()
+    const transaction = db.transaction(() => {
+      db.prepare(`INSERT INTO speed_training_sessions (question_count, correct_count, elapsed_seconds, limit_seconds, accuracy, is_on_time, mode, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pdf', ?)`).run(answers.length, correctCount, elapsedSeconds, limitSeconds, accuracy, onTime ? 1 : 0, now)
+      const insert = db.prepare(`INSERT INTO speed_training_attempts
+        (question_id, selected_answer, correct_answer, elapsed_seconds, target_seconds, is_correct, is_on_time, created_at, training_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pdf')`)
+      for (const answer of answers) insert.run(answer.questionId, answer.selectedAnswer || '', answer.correctAnswer || '', 0, 0, String(answer.selectedAnswer) === String(answer.correctAnswer) ? 1 : 0, achieved ? 1 : 0, now)
+    })
+    transaction()
+    let graduated = 0
+    const recent = db.prepare('SELECT is_correct, is_on_time FROM speed_training_attempts WHERE question_id = ? ORDER BY id DESC LIMIT 2')
+    for (const answer of answers) {
+      const rows = recent.all(answer.questionId) as any[]
+      if (rows.length >= 2 && rows.every(row => row.is_correct && row.is_on_time)) graduated++
+    }
+    return { success: true, correctCount, accuracy, onTime, savedSeconds: limitSeconds - elapsedSeconds, graduated }
+  })
+  const deleteQuestion = (id: string) => {
     const db = getDb()
     const row = db.prepare('SELECT obsidian_path FROM questions WHERE id = ?').get(id) as { obsidian_path: string } | undefined
     if (row?.obsidian_path) {
       const vaultRoot = readConfig('obsidian_vault') || ''
-      try { fs.removeSync(`${vaultRoot}/${row.obsidian_path}`) } catch { }
+      const owners = db.prepare('SELECT COUNT(*) c FROM questions WHERE obsidian_path = ?').get(row.obsidian_path) as { c: number }
+      if (vaultRoot && owners.c === 1) {
+        try { fs.removeSync(resolveInside(vaultRoot, row.obsidian_path)) } catch (error: any) { logger.warn('vault', 'delete_note_failed', error.message) }
+      }
     }
+    removeVaultRetry(id)
     db.prepare('DELETE FROM questions WHERE id = ?').run(id)
     logger.info('confirm', 'question_deleted', `错题已删除: ${id}`)
-  })
+  }
+  ipcMain.handle('questions:delete', (_e, id: string) => deleteQuestion(id))
+  ipcMain.handle('questions:deleteQueued', (_e, ids: unknown) => deleteQueueItems(ids, {
+    getStatus: id => (getDb().prepare('SELECT status FROM questions WHERE id = ?').get(id) as { status: string } | undefined)?.status,
+    remove: deleteQuestion
+  }))
   ipcMain.handle('questions:updateStatus', (_e, id: string, status: string) => {
-    getDb().prepare('UPDATE questions SET status = ? WHERE id = ?').run(status, id)
+    if (!['pending', 'classified'].includes(status)) throw new Error('不允许此状态变更')
+    const changed = getDb().prepare("UPDATE questions SET status = ? WHERE id = ? AND status != 'confirmed'").run(status, id)
+    if (!changed.changes) throw new Error('题目已入库或已删除，请刷新列表')
+  })
+  ipcMain.handle('questions:updateDraft', (_e, id: string, updates: any) => {
+    const fields = ['level1', 'level2', 'level3', 'ocr_text', 'error_type', 'error_count', 'source', 'reflection', 'has_graphics', 'graphic_image_path']
+    const selected = fields.filter(field => updates[field] !== undefined)
+    if (!selected.length) return { success: true }
+    const result = getDb().prepare(`UPDATE questions SET ${selected.map(field => `${field} = ?`).join(', ')} WHERE id = ? AND status IN ('pending', 'classified')`).run(...selected.map(field => updates[field]), id)
+    return { success: !!result.changes, error: result.changes ? undefined : '待确认题目状态已变更' }
   })
 
   ipcMain.handle('questions:update', async (_e, id: string, updates: any) => {
@@ -490,41 +736,14 @@ export function registerIpcHandlers(): void {
     }
     if (sets.length === 0) return { success: false }
     values.push(id)
-    db.prepare(`UPDATE questions SET ${sets.join(', ')} WHERE id = ?`).run(...values)
-
-    // 分类变更后迁移 vault 中的 .md 文件到新目录
-    const row = db.prepare('SELECT * FROM questions WHERE id = ?').get(id) as any
-    const vaultRoot = readConfig('obsidian_vault') || ''
-    if (row?.obsidian_path && vaultRoot) {
-      const level1 = row.level1 || '其他'
-      const level2 = row.level2 || ''
-      const level3 = row.level3 || ''
-      const subdir = level3 ? `${level1}/${level2}/${level3}` : level2 ? `${level1}/${level2}` : level1
-      const fileName = path.basename(row.obsidian_path)
-      const newRelativePath = `${subdir}/${fileName}`
-
-      if (newRelativePath !== row.obsidian_path) {
-        const oldFullPath = path.join(vaultRoot, row.obsidian_path)
-        const newFullPath = path.join(vaultRoot, newRelativePath)
-        if (fs.existsSync(oldFullPath)) {
-          try {
-            const newDir = path.dirname(newFullPath)
-            if (fs.existsSync(newDir) && !fs.statSync(newDir).isDirectory()) fs.removeSync(newDir)
-            fs.ensureDirSync(newDir)
-            fs.moveSync(oldFullPath, newFullPath, { overwrite: false })
-            db.prepare('UPDATE questions SET obsidian_path = ? WHERE id = ?').run(newRelativePath, id)
-            logger.info('vault', 'moved_on_edit', `编辑后迁移: ${row.obsidian_path} → ${newRelativePath}`)
-          } catch (err: any) {
-            logger.warn('vault', 'move_on_edit_failed', `编辑后迁移失败: ${err.message}`, { oldPath: row.obsidian_path })
-          }
-        }
-      }
-
-      // Regenerate vault markdown content
-      const fullPath = path.join(vaultRoot, newRelativePath)
-      if (fs.existsSync(fullPath)) {
-        const md = buildMarkdown({ ...row, imageUrl: row.image_url, status: 'confirmed', errorCount: row.error_count })
-        fs.writeFileSync(fullPath, md, 'utf-8')
+    const result = db.prepare(`UPDATE questions SET ${sets.join(', ')} WHERE id = ?`).run(...values)
+    if (!result.changes) return { success: false, error: '题目已删除' }
+    const row = loadQuestionData(id)
+    if (row.status === 'confirmed') {
+      try { syncQuestionNotes(id) } catch (error: any) {
+        db.prepare("UPDATE questions SET sync_status = 'failed', sync_error = ? WHERE id = ?").run(error.message, id)
+        logger.warn('vault', 'edit_sync_failed', error.message, { id })
+        return { success: true, syncPending: true, warning: '修改已保存，笔记同步失败，可通过校验补写' }
       }
     }
     logger.info('confirm', 'question_updated', `错题已更新: ${id}`)
@@ -553,38 +772,48 @@ export function registerIpcHandlers(): void {
   })
   ipcMain.handle('questions:stats', () => {
     const db = getDb()
-    const total = (db.prepare('SELECT COUNT(*) as cnt FROM questions').get() as { cnt: number }).cnt
-    const byLevel1 = db.prepare('SELECT level1, COUNT(*) as cnt FROM questions GROUP BY level1 ORDER BY cnt DESC').all()
+    const total = (db.prepare('SELECT COUNT(*) as cnt FROM questions WHERE status = \'confirmed\'').get() as { cnt: number }).cnt
+    const byLevel1 = db.prepare('SELECT level1, COUNT(*) as cnt FROM questions WHERE status = \'confirmed\' GROUP BY level1 ORDER BY cnt DESC').all()
     const byLevel1WithPct = (byLevel1 as any[]).map((l: any) => ({ ...l, pct: total > 0 ? Math.round((l.cnt / total) * 100) : 0 }))
-    const byLevel2 = db.prepare('SELECT level1, level2, COUNT(*) as cnt, AVG(error_count) as avg_err, SUM(error_count) as total_err FROM questions GROUP BY level1, level2 ORDER BY cnt DESC').all()
-    const byLevel3 = db.prepare("SELECT level1, level2, level3, COUNT(*) as cnt, AVG(error_count) as avg_err, SUM(error_count) as total_err FROM questions WHERE level3 IS NOT NULL AND level3 != '' GROUP BY level1, level2, level3 ORDER BY cnt DESC LIMIT 80").all()
-    const dailyStats = db.prepare('SELECT date(created_at) as day, COUNT(*) as cnt FROM questions GROUP BY day ORDER BY day ASC LIMIT 180').all()
-    const weeklyStats = db.prepare("SELECT strftime('%Y-W%W', created_at) as week, COUNT(*) as cnt FROM questions GROUP BY week ORDER BY week DESC LIMIT 12").all()
-    const monthlyStats = db.prepare("SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as cnt FROM questions GROUP BY month ORDER BY month DESC LIMIT 12").all()
-    const topErrors = db.prepare('SELECT id, level1, level2, level3, error_count, image_url, obsidian_path, created_at FROM questions ORDER BY error_count DESC LIMIT 30').all()
-    const recent7 = (db.prepare("SELECT COUNT(*) as cnt FROM questions WHERE created_at >= date('now', '-7 days')").get() as { cnt: number }).cnt
-    const prev7 = (db.prepare("SELECT COUNT(*) as cnt FROM questions WHERE created_at >= date('now', '-14 days') AND created_at < date('now', '-7 days')").get() as { cnt: number }).cnt
-    const recent30 = (db.prepare("SELECT COUNT(*) as cnt FROM questions WHERE created_at >= date('now', '-30 days')").get() as { cnt: number }).cnt
-    const prev30 = (db.prepare("SELECT COUNT(*) as cnt FROM questions WHERE created_at >= date('now', '-60 days') AND created_at < date('now', '-30 days')").get() as { cnt: number }).cnt
-    const errorDist = db.prepare("SELECT CASE WHEN error_count >= 3 THEN '3+' ELSE CAST(error_count AS TEXT) END as err_level, COUNT(*) as cnt FROM questions GROUP BY err_level ORDER BY err_level").all()
-    const errorTypeDist = db.prepare("SELECT error_type, COUNT(*) as cnt FROM questions WHERE error_type IS NOT NULL AND error_type != '' GROUP BY error_type ORDER BY cnt DESC LIMIT 12").all()
-    const confidenceDist = db.prepare('SELECT SUM(CASE WHEN confidence < 0.6 THEN 1 ELSE 0 END) as low, SUM(CASE WHEN confidence >= 0.6 AND confidence < 0.8 THEN 1 ELSE 0 END) as mid, SUM(CASE WHEN confidence >= 0.8 THEN 1 ELSE 0 END) as high FROM questions').get()
-    const todayCount = (db.prepare("SELECT COUNT(*) as c FROM questions WHERE status = 'confirmed' AND date(confirmed_at) = date('now', 'localtime')").get() as { c: number }).c
-    const firstRecord = db.prepare('SELECT MIN(created_at) as d FROM questions').get() as { d: string }
+    const byLevel2 = db.prepare('SELECT level1, level2, COUNT(*) as cnt, AVG(CASE WHEN error_type = \'正确但超时\' THEN NULL ELSE error_count END) as avg_err, SUM(CASE WHEN error_type = \'正确但超时\' THEN 0 ELSE error_count END) as total_err FROM questions WHERE status = \'confirmed\' GROUP BY level1, level2 ORDER BY cnt DESC').all()
+    const byLevel3 = db.prepare("SELECT level1, level2, level3, COUNT(*) as cnt, AVG(CASE WHEN error_type = '正确但超时' THEN NULL ELSE error_count END) as avg_err, SUM(CASE WHEN error_type = '正确但超时' THEN 0 ELSE error_count END) as total_err FROM questions WHERE status = 'confirmed' AND level3 IS NOT NULL AND level3 != '' GROUP BY level1, level2, level3 ORDER BY cnt DESC LIMIT 80").all()
+    const dailyStats = db.prepare("SELECT * FROM (SELECT date(confirmed_at, '+8 hours') as day, COUNT(*) as cnt FROM questions WHERE status = 'confirmed' GROUP BY day ORDER BY day DESC LIMIT 180) ORDER BY day ASC").all()
+    const weeklyStats = db.prepare("SELECT strftime('%Y-W%W', confirmed_at, '+8 hours') as week, COUNT(*) as cnt FROM questions WHERE status = 'confirmed' GROUP BY week ORDER BY week DESC LIMIT 12").all()
+    const monthlyStats = db.prepare("SELECT strftime('%Y-%m', confirmed_at, '+8 hours') as month, COUNT(*) as cnt FROM questions WHERE status = 'confirmed' GROUP BY month ORDER BY month DESC LIMIT 12").all()
+    const topErrors = db.prepare('SELECT id, level1, level2, level3, error_count, image_url, obsidian_path, created_at FROM questions WHERE status = \'confirmed\' AND COALESCE(error_type, \'\') != \'正确但超时\' AND error_count > 0 ORDER BY error_count DESC, id LIMIT 30').all()
+    const recent7 = (db.prepare("SELECT COUNT(*) as cnt FROM questions WHERE status = 'confirmed' AND date(confirmed_at, '+8 hours') >= date('now', '+8 hours', '-7 days')").get() as { cnt: number }).cnt
+    const prev7 = (db.prepare("SELECT COUNT(*) as cnt FROM questions WHERE status = 'confirmed' AND date(confirmed_at, '+8 hours') >= date('now', '+8 hours', '-14 days') AND date(confirmed_at, '+8 hours') < date('now', '+8 hours', '-7 days')").get() as { cnt: number }).cnt
+    const recent30 = (db.prepare("SELECT COUNT(*) as cnt FROM questions WHERE status = 'confirmed' AND date(confirmed_at, '+8 hours') >= date('now', '+8 hours', '-30 days')").get() as { cnt: number }).cnt
+    const prev30 = (db.prepare("SELECT COUNT(*) as cnt FROM questions WHERE status = 'confirmed' AND date(confirmed_at, '+8 hours') >= date('now', '+8 hours', '-60 days') AND date(confirmed_at, '+8 hours') < date('now', '+8 hours', '-30 days')").get() as { cnt: number }).cnt
+    const errorDist = db.prepare("SELECT CASE WHEN error_count >= 3 THEN '3+' ELSE CAST(error_count AS TEXT) END as err_level, COUNT(*) as cnt FROM questions WHERE status = 'confirmed' AND COALESCE(error_type, '') != '正确但超时' AND error_count > 0 GROUP BY err_level ORDER BY err_level").all()
+    const errorTypeDist = db.prepare("SELECT error_type, COUNT(*) as cnt FROM questions WHERE status = 'confirmed' AND error_type IS NOT NULL AND error_type != '' GROUP BY error_type ORDER BY cnt DESC LIMIT 12").all()
+    const confidenceDist = db.prepare('SELECT SUM(CASE WHEN confidence < 0.6 THEN 1 ELSE 0 END) as low, SUM(CASE WHEN confidence >= 0.6 AND confidence < 0.8 THEN 1 ELSE 0 END) as mid, SUM(CASE WHEN confidence >= 0.8 THEN 1 ELSE 0 END) as high FROM questions WHERE status = \'confirmed\'').get()
+    const todayCount = (db.prepare("SELECT COUNT(*) as c FROM questions WHERE status = 'confirmed' AND date(confirmed_at, '+8 hours') = date('now', '+8 hours')").get() as { c: number }).c
+    const firstRecord = db.prepare('SELECT MIN(created_at) as d FROM questions WHERE status = \'confirmed\'').get() as { d: string }
     const daysSinceFirst = total > 0 ? Math.max(1, (Date.now() - new Date(firstRecord?.d || new Date().toISOString()).getTime()) / (1000 * 86400)) : 1
     const dailyAvg = total > 0 ? Math.round(total / daysSinceFirst) : 0
-    const reviewedThisWeek = (db.prepare("SELECT COUNT(DISTINCT card_path) c FROM review_log WHERE date >= date('now', 'localtime', '-6 days')").get() as { c: number }).c
-    const dueReviewCount = (db.prepare("SELECT COUNT(*) c FROM review_state WHERE due_date <= date('now', 'localtime')").get() as { c: number }).c
-    const review30 = db.prepare("SELECT COUNT(*) total, SUM(CASE WHEN result = 'wrong' THEN 1 ELSE 0 END) wrong FROM review_log WHERE date >= date('now', 'localtime', '-29 days')").get() as { total: number; wrong: number }
+    const reviewedThisWeek = (db.prepare("SELECT COUNT(DISTINCT card_path) c FROM review_log WHERE date >= date('now', '+8 hours', '-6 days')").get() as { c: number }).c
+    const dueReviewCount = (db.prepare("SELECT COUNT(*) c FROM review_state WHERE due_date <= date('now', '+8 hours')").get() as { c: number }).c
+    const review30 = db.prepare("SELECT COUNT(*) total, SUM(CASE WHEN result = 'wrong' THEN 1 ELSE 0 END) wrong FROM review_log WHERE date >= date('now', '+8 hours', '-29 days')").get() as { total: number; wrong: number }
     const reviewWrongRate = review30.total > 0 ? Math.round((review30.wrong || 0) / review30.total * 100) : 0
     const latestAttempt = db.prepare('SELECT accuracy, created_at FROM test_attempts ORDER BY created_at DESC LIMIT 1').get() as { accuracy: number; created_at: string } | undefined
-    const reviewDaily = db.prepare("SELECT date, COUNT(DISTINCT card_path) cnt FROM review_log WHERE date >= date('now', 'localtime', '-89 days') GROUP BY date ORDER BY date").all()
-    const weaknessPoints = db.prepare(`SELECT level1, level2, COUNT(*) question_count, SUM(error_count) total_errors,
-      SUM(CASE WHEN error_count >= 2 THEN 1 ELSE 0 END) repeated_count, MAX(created_at) last_error_at
+    const reviewDaily = db.prepare("SELECT date, COUNT(DISTINCT card_path) cnt FROM review_log WHERE date >= date('now', '+8 hours', '-89 days') GROUP BY date ORDER BY date").all()
+    const weaknessPoints = db.prepare(`SELECT level1, level2, COUNT(*) question_count, SUM(CASE WHEN error_type = '正确但超时' THEN 0 ELSE error_count END) total_errors,
+      SUM(CASE WHEN error_count >= 2 AND COALESCE(error_type, '') != '正确但超时' THEN 1 ELSE 0 END) repeated_count, MAX(created_at) last_error_at
       FROM questions WHERE status = 'confirmed' GROUP BY level1, level2
       ORDER BY total_errors DESC, question_count DESC LIMIT 12`).all()
+    const speedSummary = db.prepare(`SELECT COUNT(*) attempts,
+      COALESCE(ROUND(100.0 * SUM(CASE WHEN is_correct = 1 AND is_on_time = 1 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)), 0) achievement_rate,
+      COALESCE(ROUND(AVG(target_seconds - elapsed_seconds)), 0) avg_saved_seconds
+      FROM speed_training_attempts WHERE training_mode = 'online' AND julianday(created_at) >= julianday('now', '-7 days')`).get()
+    const speedPending = db.prepare(`SELECT COUNT(*) cnt FROM questions WHERE status = 'confirmed' AND
+      (error_type IN ('正确但超时','错误且超时') OR (json_valid(original_answer) AND COALESCE(json_extract(original_answer, '$.overtimeSeconds'), 0) > 0)) AND
+      id NOT IN (SELECT a.question_id FROM speed_training_attempts a WHERE a.id IN (SELECT b.id FROM speed_training_attempts b WHERE b.question_id = a.question_id ORDER BY b.id DESC LIMIT 2) GROUP BY a.question_id HAVING COUNT(*) = 2 AND MIN(a.is_correct) = 1 AND MIN(a.is_on_time) = 1)`).get() as { cnt: number }
+    const speedDaily = db.prepare(`SELECT date(created_at, '+8 hours') day, ROUND(AVG(elapsed_seconds), 1) avg_seconds, COUNT(*) attempts
+      FROM speed_training_attempts WHERE training_mode = 'online' AND julianday(created_at) >= julianday('now', '-29 days') GROUP BY day ORDER BY day`).all()
     return { total, dailyAvg, todayCount, recent7, prev7, recent30, prev30, byLevel1: byLevel1WithPct, byLevel2, byLevel3, dailyStats, weeklyStats, monthlyStats, topErrors, errorDist, errorTypeDist, confidenceDist,
-      reviewedThisWeek, dueReviewCount, reviewWrongRate, latestAttempt: latestAttempt || null, reviewDaily, weaknessPoints }
+      reviewedThisWeek, dueReviewCount, reviewWrongRate, latestAttempt: latestAttempt || null, reviewDaily, weaknessPoints,
+      speedTraining: { ...(speedSummary as any), pending: speedPending.cnt, daily: speedDaily } }
   })
 
   // Tags
@@ -693,7 +922,7 @@ export function registerIpcHandlers(): void {
       SELECT id, level1, level2, level3, error_count, error_type,
              ocr_text, obsidian_path, confirmed_at, created_at, reflection
       FROM questions
-      WHERE date(confirmed_at) = ? AND status = 'confirmed'
+      WHERE date(confirmed_at, '+8 hours') = ? AND status = 'confirmed'
       ORDER BY created_at DESC
     `).all(targetDate) as any[]
 
@@ -702,8 +931,8 @@ export function registerIpcHandlers(): void {
       SELECT level1, level2, level3,
              COUNT(*) as question_count,
              SUM(error_count) as total_errors,
-             MIN(date(confirmed_at)) as first_seen,
-             MAX(date(confirmed_at)) as last_seen
+             MIN(date(confirmed_at, '+8 hours')) as first_seen,
+             MAX(date(confirmed_at, '+8 hours')) as last_seen
       FROM questions
       WHERE status = 'confirmed'
       GROUP BY level1, level2, COALESCE(level3, '')
@@ -778,7 +1007,7 @@ export function registerIpcHandlers(): void {
       SELECT id, level1, level2, level3, error_count, error_type,
              ocr_text, obsidian_path, confirmed_at, created_at, reflection
       FROM questions
-      WHERE date(confirmed_at) = ? AND status = 'confirmed'
+      WHERE date(confirmed_at, '+8 hours') = ? AND status = 'confirmed'
       ORDER BY created_at DESC
     `).all(targetDate) as any[]
 
@@ -803,7 +1032,7 @@ export function registerIpcHandlers(): void {
 
     try {
       const result = await generateDailyInduction(
-        { todayQuestions, existingCards },
+        { targetDate, todayQuestions, existingCards },
         onProgress
       )
 
@@ -839,7 +1068,8 @@ export function registerIpcHandlers(): void {
         data.updated_cards,
         data.moc_updates
       )
-      return { success: true, ...result }
+      const success = result.dailyNote.success && [...result.newCards, ...result.updatedCards, ...result.mocUpdates].every(item => item.success)
+      return { success, ...result, error: success ? undefined : '部分笔记未写入，请查看失败项后重试' }
     } catch (err: any) {
       return { success: false, error: err.message }
     }
@@ -888,34 +1118,34 @@ export function registerIpcHandlers(): void {
     try {
       const db = getDb()
       const today = localDateKey()
-      db.prepare('INSERT INTO review_log (card_path, date, result, created_at) VALUES (?, ?, ?, ?)')
-        .run(cardPath, today, result || 'done', new Date().toISOString())
+      if (!['wrong', 'hard', 'done', 'easy'].includes(result)) throw new Error('请选择真实回忆结果，阅读不等于掌握')
+      const content = readCardContent(cardPath)
+      if (!content.success) throw new Error('知识卡片不存在或无法读取，未记录复习')
+      const previous = db.prepare('SELECT * FROM review_state WHERE card_path = ?').get(cardPath) as any
+      if (previous?.last_reviewed_at && Date.now() - Date.parse(previous.last_reviewed_at) < 3000) return { success: true, alreadyRecorded: true, dueDate: previous.due_date }
+      const next = scheduleCardReview(previous, result as RecallRating)
+      const now = new Date().toISOString()
+      db.transaction(() => {
+        db.prepare('INSERT INTO review_log (card_path, date, result, created_at, scheduler_log) VALUES (?, ?, ?, ?, ?)')
+          .run(cardPath, today, result, now, next.logJson)
+        db.prepare(`INSERT INTO review_state
+          (card_path, interval_days, repetitions, lapses, last_rating, last_reviewed_at, due_date, fsrs_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(card_path) DO UPDATE SET interval_days = excluded.interval_days,
+            repetitions = excluded.repetitions, lapses = excluded.lapses,
+            last_rating = excluded.last_rating, last_reviewed_at = excluded.last_reviewed_at,
+            due_date = excluded.due_date, fsrs_json = excluded.fsrs_json`)
+          .run(cardPath, next.intervalDays, next.repetitions, next.lapses, result, now, next.dueDate, next.fsrsJson)
+      })()
       const reviewedCount = (db.prepare('SELECT COUNT(DISTINCT card_path) c FROM review_log WHERE date = ?').get(today) as { c: number }).c
       let cardBumped = false
       if (result === 'wrong') {
         const r = bumpCardError(cardPath)
         cardBumped = r.success
       }
-      const previous = db.prepare('SELECT interval_days, repetitions, lapses FROM review_state WHERE card_path = ?').get(cardPath) as { interval_days: number; repetitions: number; lapses: number } | undefined
-      const oldInterval = previous?.interval_days || 0
-      const rating = ['wrong', 'hard', 'done', 'easy'].includes(result) ? result : 'done'
-      const intervalDays = rating === 'wrong' ? 1
-        : rating === 'hard' ? Math.max(1, Math.round(Math.max(1, oldInterval) * 1.2))
-          : rating === 'easy' ? Math.max(4, Math.round(Math.max(2, oldInterval) * 2.5))
-            : Math.max(2, Math.round(Math.max(1, oldInterval) * 2))
-      const dueDate = dayjs().add(intervalDays, 'day').format('YYYY-MM-DD')
-      db.prepare(`INSERT INTO review_state
-        (card_path, interval_days, repetitions, lapses, last_rating, last_reviewed_at, due_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(card_path) DO UPDATE SET interval_days = excluded.interval_days,
-          repetitions = excluded.repetitions, lapses = excluded.lapses,
-          last_rating = excluded.last_rating, last_reviewed_at = excluded.last_reviewed_at,
-          due_date = excluded.due_date`)
-        .run(cardPath, intervalDays, (previous?.repetitions || 0) + 1,
-          (previous?.lapses || 0) + (rating === 'wrong' ? 1 : 0), rating, new Date().toISOString(), dueDate)
       logger.info('knowledge', 'review_done', `复习完成: ${cardPath}`, { result, cardBumped })
       const completedPlanTask = completePlanTaskForActivity('review', ['复盘'], reviewedCount)
-      return { success: true, cardBumped, intervalDays, dueDate, completedPlanTask }
+      return { success: true, cardBumped, intervalDays: next.intervalDays, dueDate: next.dueDate, completedPlanTask }
     } catch (err: any) {
       return { success: false, error: err.message }
     }
@@ -931,6 +1161,14 @@ export function registerIpcHandlers(): void {
   })
 
   // ============ Test Builder (组卷导出) ============
+  ipcMain.handle('review:createBatch', (_e, params: any) => createReviewBatch(params))
+  ipcMain.handle('review:getBatch', (_e, id: string) => getReviewBatch(id))
+  ipcMain.handle('review:listBatches', () => listReviewBatches())
+  ipcMain.handle('review:completeBatch', (_e, id: string) => completeReviewBatch(id))
+  ipcMain.handle('review:exportBatch', (e, params: any) => exportReviewBatch(params, (stage, done, total) => {
+    const owner = BrowserWindow.fromWebContents(e.sender)
+    if (owner && !owner.isDestroyed()) owner.webContents.send('pdf:progress', { stage, done, total, ts: Date.now() })
+  }))
 
   // 从复习队列选题（卡片分类 → 匹配错题，每卡最多 3 题）
   ipcMain.handle('test:selectFromReviewQueue', (_e, count?: number) => {
@@ -1031,6 +1269,97 @@ export function registerIpcHandlers(): void {
     }
   })
 
+  ipcMain.handle('test:smartSelect', (_e, params?: {
+    mode?: 'review' | 'weak' | 'recent' | 'balanced' | 'material'
+    count?: number
+    level1?: string
+    avoidRecentDays?: number
+  }) => {
+    try {
+      const db = getDb()
+      const mode = params?.mode || 'review'
+      const count = Math.min(100, Math.max(1, Number(params?.count) || 10))
+      const avoidSince = dayjs().subtract(Math.max(0, Number(params?.avoidRecentDays) || 7), 'day')
+
+      const recentAttempts = db.prepare(
+        'SELECT question_ids, created_at FROM test_attempts WHERE created_at >= ? ORDER BY created_at DESC'
+      ).all(avoidSince.toISOString()) as Array<{ question_ids: string; created_at: string }>
+      const practicedAt = new Map<string, string>()
+      for (const attempt of recentAttempts) {
+        try {
+          for (const id of JSON.parse(attempt.question_ids || '[]')) {
+            if (!practicedAt.has(id)) practicedAt.set(id, attempt.created_at)
+          }
+        } catch { /* ignore malformed legacy attempts */ }
+      }
+
+      const rows = db.prepare(`
+        SELECT id, level1, level2, level3, error_count, error_type, group_id,
+               has_graphics, graphic_image_path, ocr_text, source, created_at, confirmed_at
+        FROM questions
+        WHERE status = 'confirmed' AND (? = '' OR level1 = ?)
+        ORDER BY created_at DESC
+        LIMIT 1000
+      `).all(params?.level1 || '', params?.level1 || '') as any[]
+
+      const scored = rows.map(question => {
+        const ageDays = Math.max(0, dayjs().diff(dayjs(question.confirmed_at || question.created_at), 'day'))
+        const recentlyPracticed = practicedAt.has(question.id)
+        let score = (question.error_count || 1) * 18 + Math.min(ageDays, 30)
+        const reasons: string[] = []
+
+        if ((question.error_count || 1) >= 3) reasons.push(`重复错 ${question.error_count} 次`)
+        else if ((question.error_count || 1) >= 2) reasons.push('曾重复出错')
+        if (ageDays >= 7) reasons.push(`${ageDays} 天未重练`)
+        if (question.group_id) reasons.push('资料题组')
+        if (question.has_graphics) reasons.push('图形题')
+
+        if (mode === 'weak') score += (question.error_count || 1) * 25
+        if (mode === 'recent') score += Math.max(0, 40 - ageDays * 3)
+        if (mode === 'material') score += question.group_id ? 100 : -100
+        if (mode === 'balanced') score += Math.min(ageDays, 14)
+        if (mode === 'review') score += ageDays >= 7 ? 35 : 0
+        if (recentlyPracticed) score -= 80
+        if (reasons.length === 0) reasons.push('补充知识点覆盖')
+        return { question, score, reasons, recentlyPracticed }
+      }).sort((a, b) => b.score - a.score)
+
+      const selected: typeof scored = []
+      const categoryCounts = new Map<string, number>()
+      const usedGroups = new Set<string>()
+      const maxMaterialGroups = mode === 'material' ? Math.max(1, Math.ceil(count / 5)) : Math.max(1, Math.ceil(count / 4))
+      const categoryCap = Math.max(2, Math.ceil(count * 0.4))
+      // First pass strictly avoids recently practised questions; second pass fills
+      // only when the eligible pool is smaller than the requested paper.
+      for (const allowRecent of [false, true]) {
+        for (const item of scored) {
+          if (selected.length >= count) break
+          if (selected.some(entry => entry.question.id === item.question.id)) continue
+          if (!allowRecent && item.recentlyPracticed) continue
+          if (mode === 'material' && !item.question.group_id) continue
+          if (item.question.group_id && !usedGroups.has(item.question.group_id) && usedGroups.size >= maxMaterialGroups) continue
+          const category = `${item.question.level1}|${item.question.level2}`
+          if (mode === 'balanced' && (categoryCounts.get(category) || 0) >= categoryCap) continue
+          selected.push(item)
+          categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1)
+          if (item.question.group_id) usedGroups.add(item.question.group_id)
+        }
+      }
+
+      return {
+        success: true,
+        ids: selected.map(item => item.question.id),
+        selections: selected.map(item => ({
+          id: item.question.id,
+          reason: item.reasons.slice(0, 2).join(' · '),
+          recentlyPracticed: item.recentlyPracticed
+        }))
+      }
+    } catch (err: any) {
+      return { success: false, error: err.message, ids: [], selections: [] }
+    }
+  })
+
   ipcMain.handle('test:generatePdf', async (e, questionIds: string[], options: any) => {
     try {
       const senderWin = BrowserWindow.fromWebContents(e.sender)
@@ -1092,8 +1421,8 @@ export function registerIpcHandlers(): void {
     return { success: !!plan, plan }
   })
   ipcMain.handle('plan:history', (_e, limit?: number) => getPlanHistory(limit || 7))
-  ipcMain.handle('plan:regenerateToday', async () => {
-    const result = await regenerateTodayPlan()
+  ipcMain.handle('plan:regenerateToday', async (_e, input?: { feedback?: string }) => {
+    const result = await regenerateTodayPlan(input && typeof input === 'object' ? input : {})
     return { ...result, exam: getExamInfo(), phase: getExamPhase() }
   })
   ipcMain.handle('plan:forward', async () => {
@@ -1113,7 +1442,7 @@ export async function runAutoInduct(dateStr?: string): Promise<{ inducted: boole
   // Check if date has confirmed questions
   const dayQuestions = db.prepare(`
     SELECT id FROM questions
-    WHERE date(confirmed_at) = ? AND status = 'confirmed'
+    WHERE date(confirmed_at, '+8 hours') = ? AND status = 'confirmed'
     LIMIT 1
   `).all(dateStr) as any[]
 
@@ -1124,7 +1453,7 @@ export async function runAutoInduct(dateStr?: string): Promise<{ inducted: boole
   // Check if daily note already exists
   const existingNotes = scanDailyNotes()
   const hasNote = existingNotes.some(n => n.date === dateStr)
-  if (hasNote) {
+  if (hasNote && !readConfig(`induction_pending:${dateStr}`)) {
     return { inducted: false, reason: `${dateStr} 已有每日笔记` }
   }
 
@@ -1133,7 +1462,7 @@ export async function runAutoInduct(dateStr?: string): Promise<{ inducted: boole
     SELECT id, level1, level2, level3, error_count, error_type,
            ocr_text, obsidian_path, confirmed_at, created_at, reflection
     FROM questions
-    WHERE date(confirmed_at) = ? AND status = 'confirmed'
+    WHERE date(confirmed_at, '+8 hours') = ? AND status = 'confirmed'
     ORDER BY created_at DESC
   `).all(dateStr) as any[]
 
@@ -1153,13 +1482,15 @@ export async function runAutoInduct(dateStr?: string): Promise<{ inducted: boole
   try {
     logger.info('auto_induct', 'start', `开始自动归纳 ${dateStr} 的 ${questions.length} 道错题`)
 
-    const result = await generateDailyInduction(
-      { todayQuestions: questions, existingCards },
+    const pending = readConfig(`induction_pending:${dateStr}`)
+    const result = pending ? JSON.parse(pending) : await generateDailyInduction(
+      { targetDate: dateStr, todayQuestions: questions, existingCards },
       (stage, message) => logger.info('auto_induct', stage, message)
     )
+    writeConfig(`induction_pending:${dateStr}`, JSON.stringify(result))
 
-    // Auto-write to vault
-    writeInductionResults(
+    // Auto-write to vault; preserve the payload until every operation succeeds.
+    const written = writeInductionResults(
       result.daily_note.full_markdown,
       result.daily_note.date,
       result.card_operations.new_cards,
@@ -1167,6 +1498,8 @@ export async function runAutoInduct(dateStr?: string): Promise<{ inducted: boole
       result.card_operations.moc_updates
     )
 
+    if (!written.dailyNote.success || [...written.newCards, ...written.updatedCards, ...written.mocUpdates].some(item => !item.success)) throw new Error('归纳已生成，但部分笔记写入失败；下次将继续补写，不会重复生成或累计')
+    writeConfig(`induction_pending:${dateStr}`, '')
     logger.info('auto_induct', 'done', `自动归纳完成: ${dateStr}, 新卡片 ${result.card_operations.new_cards.length}, 更新 ${result.card_operations.updated_cards.length}`)
     return { inducted: true, date: dateStr }
   } catch (err: any) {
@@ -1186,17 +1519,17 @@ export async function runAutoInductForRecentDays(): Promise<Array<{ inducted: bo
 
   // Find dates in the last 7 days that have confirmed questions but no daily note
   const recentDates = db.prepare(`
-    SELECT DISTINCT date(confirmed_at) as d
+    SELECT DISTINCT date(confirmed_at, '+8 hours') as d
     FROM questions
     WHERE status = 'confirmed'
-      AND date(confirmed_at) >= date('now', '-7 days')
-      AND date(confirmed_at) < date('now')
+      AND date(confirmed_at, '+8 hours') >= date('now', '-7 days')
+      AND date(confirmed_at, '+8 hours') < date('now')
     ORDER BY d ASC
   `).all() as { d: string }[]
 
   for (const { d } of recentDates) {
     const hasNote = existingNotes.some(n => n.date === d)
-    if (hasNote) {
+    if (hasNote && !readConfig(`induction_pending:${d}`)) {
       results.push({ inducted: false, date: d, reason: `${d} 已有每日笔记` })
       continue
     }

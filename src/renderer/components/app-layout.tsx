@@ -1,25 +1,15 @@
 import { useState, useEffect } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
-import { Layout, Menu, Badge, Tooltip, Tag } from 'antd'
-import {
-  HomeOutlined,
-  ClockCircleOutlined,
-  DatabaseOutlined,
-  BarChartOutlined,
-  TagsOutlined,
-  FileTextOutlined,
-  SettingOutlined,
-  FireOutlined,
-  BookOutlined,
-  FilePdfOutlined,
-  WifiOutlined,
-  ScheduleOutlined
-} from '@ant-design/icons'
+import { Layout, Menu, Badge, Tooltip, Tag, App, Button } from 'antd'
+import { FireOutlined, WifiOutlined } from '@ant-design/icons'
+import { HomeOutlined, ReviewInboxOutlined, LogOutlined, DatabaseOutlined, BarChartOutlined, TagsOutlined, SettingOutlined, BookOutlined, FilePdfOutlined, ScheduleOutlined, TimerOutlined } from '@/components/study-icons'
 import logoPng from '@/assets/logo.png'
+import { AnalysisTasks } from '@/components/analysis-tasks'
 
 const { Sider, Content } = Layout
 
 export function AppLayout() {
+  const { notification } = App.useApp()
   const navigate = useNavigate()
   const location = useLocation()
   const [collapsed, setCollapsed] = useState(false)
@@ -27,6 +17,7 @@ export function AppLayout() {
   const [pendingCount, setPendingCount] = useState(0)
   const [version, setVersion] = useState('')
   const [online, setOnline] = useState(navigator.onLine)
+  const [fenbiProgress, setFenbiProgress] = useState<{ total: number; done: number } | null>(null)
 
   const selectedKey = '/' + location.pathname.split('/')[1]
 
@@ -39,8 +30,8 @@ export function AppLayout() {
   }, [])
 
   useEffect(() => {
-    window.api.getStreak().then(r => setStreak(r.streak))
-    window.api.getPendingCount().then(setPendingCount)
+    window.api.getStreak().then(r => setStreak(r.streak)).catch(() => {})
+    window.api.getPendingCount().then(setPendingCount).catch(() => {})
     window.api.getAppVersion().then(setVersion).catch(() => {})
   }, [])
 
@@ -48,6 +39,34 @@ export function AppLayout() {
   useEffect(() => {
     window.api.getPendingCount().then(setPendingCount).catch(() => {})
   }, [location.pathname])
+
+  useEffect(() => {
+    if (typeof window.api.onFenbiAnalysisProgress !== 'function') {
+      notification.warning({ key: 'preload-update', message: '应用接口已更新，请关闭并重新启动当前应用', description: '前端刷新无法更新后台接口。现有数据不会丢失。', duration: 0 })
+      return
+    }
+    return window.api.onFenbiAnalysisProgress(event => {
+    if (event.stage === 'paused') {
+      setFenbiProgress(null)
+      notification.info({ key: 'fenbi-analysis', message: '后台分析已暂停', description: event.message, duration: 4 })
+    } else if (event.stage === 'complete') {
+      setFenbiProgress(null)
+      window.api.getPendingCount().then(setPendingCount).catch(() => {})
+      notification.success({
+        key: 'fenbi-analysis',
+        message: '粉笔错题分析完成',
+        description: event.message,
+        duration: 0,
+        btn: <Button type="primary" size="small" onClick={() => { notification.destroy('fenbi-analysis'); navigate('/pending') }}>去待确认</Button>
+      })
+    } else if (event.stage === 'started') {
+      setFenbiProgress({ total: event.total, done: event.done })
+      notification.info({ key: 'fenbi-analysis', message: '粉笔题已保存', description: event.message, duration: 4 })
+    } else {
+      setFenbiProgress({ total: event.total, done: event.done })
+    }
+    })
+  }, [navigate, notification])
 
   // 网络状态监听（PRD 埋点：网络连通性变化）
   useEffect(() => {
@@ -62,7 +81,7 @@ export function AppLayout() {
   }, [])
 
   const pendingItem = {
-    key: '/pending', icon: <ClockCircleOutlined />,
+    key: '/pending', icon: <ReviewInboxOutlined />,
     label: (
       <Badge count={pendingCount} size="small" offset={[8, 0]}>
         <span>待确认</span>
@@ -73,7 +92,7 @@ export function AppLayout() {
   const menuItems = [
     {
       type: 'group' as const,
-      label: '核心流程',
+      label: '日常学习',
       children: [
         { key: '/plan', icon: <ScheduleOutlined />, label: '每日计划' },
         { key: '/', icon: <HomeOutlined />, label: '错题处理' },
@@ -83,109 +102,59 @@ export function AppLayout() {
     },
     {
       type: 'group' as const,
-      label: '学习分析',
+      label: '复习与训练',
       children: [
+        { key: '/speed-training', icon: <TimerOutlined />, label: '速度训练' },
         { key: '/stats', icon: <BarChartOutlined />, label: '统计看板' },
         { key: '/knowledge', icon: <BookOutlined />, label: '知识归纳' },
-        { key: '/test-builder', icon: <FilePdfOutlined />, label: '组卷导出' }
+        { key: '/test-builder', icon: <FilePdfOutlined />, label: '复习与导出' }
       ]
     },
     {
       type: 'group' as const,
-      label: '系统管理',
+      label: '工具',
       children: [
         { key: '/tags', icon: <TagsOutlined />, label: '标签管理' },
-        { key: '/logs', icon: <FileTextOutlined />, label: '日志' },
+        { key: '/logs', icon: <LogOutlined />, label: '日志' },
         { key: '/settings', icon: <SettingOutlined />, label: '设置' }
       ]
     }
   ]
 
+  const currentPage = menuItems.flatMap(group => group.children).find(item => item.key === selectedKey)
+  const currentTitle = selectedKey === '/pending' ? '待确认' : currentPage?.label || '学习工作台'
+  const fixedReading = ['/pending', '/speed-training', '/settings', '/questions'].includes(selectedKey)
+
   return (
-    <Layout style={{ height: '100vh', overflow: 'hidden' }}>
+    <Layout className="app-shell">
       <Sider
         className="app-sidebar"
-        collapsible
-        collapsed={collapsed}
-        onCollapse={setCollapsed}
-        theme="light"
-        width={208}
-        style={{ borderRight: '1px solid #f0f0f0', display: 'flex', flexDirection: 'column' }}
+        collapsible collapsed={collapsed} onCollapse={setCollapsed}
+        theme="light" width={208} collapsedWidth={68}
+        breakpoint="lg" onBreakpoint={setCollapsed}
       >
-        <div style={{
-          minHeight: 56,
-          margin: '14px 16px 10px',
-          display: 'flex',
-          flexDirection: collapsed ? 'column' : 'row',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 8
-        }}>
-          <img src={logoPng} style={{
-            width: collapsed ? 30 : 38,
-            height: collapsed ? 30 : 38,
-            borderRadius: 10,
-            objectFit: 'cover',
-            boxShadow: '0 2px 6px rgba(22,119,255,0.25)'
-          }} alt="logo" />
-          <span style={{
-            fontWeight: 700,
-            fontSize: collapsed ? 11 : 15,
-            color: '#1677ff',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            letterSpacing: 0.5
-          }}>
-            {collapsed ? '小乖' : '小乖的考公错题屋'}
-          </span>
+        <div className={`app-brand${collapsed ? ' is-collapsed' : ''}`}>
+          <img src={logoPng} alt="小乖" />
+          {!collapsed && <div><strong>小乖的考公错题屋</strong><span>读懂错题，留住方法</span></div>}
         </div>
-        <div style={{ flex: 1, overflow: 'auto' }}>
-          <Menu
-            mode="inline"
-            selectedKeys={[selectedKey]}
-            items={menuItems}
-            onClick={({ key }) => navigate(key)}
-            style={{ borderRight: 0 }}
-          />
-        </div>
-        {!collapsed && (
-          <div style={{
-            padding: '10px 16px',
-            borderTop: '1px solid #f0f0f0',
-            fontSize: 11,
-            color: '#bbb',
-            textAlign: 'center',
-            userSelect: 'none'
-          }}>
-            v{version || '0.1.0'} · 考公错题管理
-          </div>
-        )}
+        <nav className="app-navigation" aria-label="主导航">
+          <Menu mode="inline" selectedKeys={[selectedKey]} items={menuItems} onClick={({ key }) => navigate(key)} />
+        </nav>
+        {!collapsed && <div className="app-sidebar-footer"><span>本地学习记录</span><span>v{version || '0.2.2'}</span></div>}
       </Sider>
-      <Layout style={{ minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
-        <div style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          padding: '6px 24px', background: '#fff', borderBottom: '1px solid #f0f0f0',
-          height: 44
-        }}>
-          <div style={{ fontSize: 12, color: '#999', display: 'flex', alignItems: 'center', gap: 8 }}>
-            {location.pathname === '/' ? '上传 → AI 分类 → 人工确认 → 知识库' : ''}
-            {!online && (
-              <Tag color="red" style={{ margin: 0 }}>
-                <WifiOutlined /> 离线模式
-              </Tag>
-            )}
+      <Layout className="app-main">
+        <div className="app-topbar">
+          <div className="app-location"><span>学习工作台</span><span aria-hidden="true">/</span><strong>{currentTitle}</strong></div>
+          <div className="app-status">
+            <AnalysisTasks />
+            {!online && <Tag color="red"><WifiOutlined /> 离线</Tag>}
+            {fenbiProgress && <Tag color="processing">分析中 {fenbiProgress.done}/{fenbiProgress.total}</Tag>}
+            <Tooltip title={`连续打开 ${streak} 天`}>
+              <span className="app-streak"><FireOutlined /> 已坚持 {streak} 天</span>
+            </Tooltip>
           </div>
-          <Tooltip title={`连续打开 ${streak} 天`}>
-            <span style={{ fontSize: 12, color: '#fa8c16' }}>
-              <FireOutlined /> 已坚持 <b>{streak}</b> 天
-            </span>
-          </Tooltip>
         </div>
-        <Content
-          className={location.pathname === '/pending/review' ? 'app-content app-content-fixed' : 'app-content'}
-          style={{ padding: 24, background: '#f5f7fa', flex: '1 1 0', overflow: location.pathname === '/pending/review' ? 'hidden' : 'auto' }}
-        >
+        <Content className={`app-content${fixedReading ? ' app-content-fixed' : ''}`} data-page={selectedKey.slice(1) || 'import'}>
           <Outlet />
         </Content>
       </Layout>

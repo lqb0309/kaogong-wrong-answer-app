@@ -1,8 +1,16 @@
 # 📚 小乖的考公错题屋（Wrong Answer App）
 
-一款面向个人备考的**错题智能管理桌面应用**（Electron + React）。
+一款面向个人备考的**错题智能管理桌面应用**。当前桌面版为 **Tauri 0.3.0 + React**，使用 macOS 系统 WebView，保留完整学习工作流；仓库同时保留 Electron 历史实现。
 
 把错题截图拖进 App → AI 自动识别分类 → 人工确认后写入 Obsidian 知识库 → 每日自动归纳知识点 → 加权复习队列 + 组卷重做，形成**「错题 → 知识点 → 复习 → 再错题」的学习闭环**。
+
+## 下载与安装
+
+在 [GitHub Releases](https://github.com/lqb0309/kaogong-wrong-answer-app/releases/latest) 下载 v0.3.0 的 macOS Apple Silicon（arm64）安装包，将“小乖的考公错题屋”拖入“应用程序”。首次使用需自行配置模型及 Obsidian 路径。资源包不包含个人题库、笔记、登录会话或密钥。
+
+本版使用本地临时签名，未做 Apple 公证；不要将其视为已公证的跨平台发行包。Intel Mac、Windows、Linux 未在本轮交付安装资源。
+
+旧 Electron 数据不会自动迁入新版。已有数据应先退出两个版本，按 [Tauri 说明](./tauri-app/README.md) 核对备份和一次性迁移流程；不要直接复制加密密钥，也不要在未核对图片和笔记引用前删除旧目录。
 
 ## ✨ 功能特性
 
@@ -11,7 +19,7 @@
 | 🗂️ 错题处理 | 拖拽 / 粘贴 / 批量导入错题截图，内容级自动去重，可旋转裁剪，可选「导入后自动分类」 |
 | ✍️ 新建错题 | 在错题处理或错题库中快速新建，支持图片与纯文字，可直接入库或先进入待确认 |
 | 🤖 AI 分类 | 视觉模型识别 + 推理模型分类（两阶段），输出三级分类 + 置信度 + 图形检测；未知分类支持模糊匹配与「采纳为新分类」自生长 |
-| ✅ 待确认 | 逐题核对流水线：自动播放、快捷键（⌘Enter / Enter / ⌘S / ←→）、批量快速入库、AI 生成复盘思路 |
+| ✅ 待确认 | 题目与复盘阅读分栏、可调比例、快捷键、批量入库；导入后后台生成复盘，核对后确认 |
 | 📓 知识归纳 | 每日自动/一键生成学习笔记 + 原子化知识卡片（易错点 / 概念辨析 / 速解技巧 / 公式定理） |
 | 🔁 复习闭环 | 加权复习队列（错误次数 × 3 + 间隔天数 + 易错点加成）；组卷导出 PDF 后「对答案回填」→ 错题与卡片错误计数 +1 |
 | 📊 统计看板 | 学习投入、复习完成、再错率、到期复习、组卷正确率与薄弱知识点分析，支持一键专项组卷 |
@@ -19,6 +27,21 @@
 | 🏷️ 标签管理 | 三级分类树增删改 + 拖拽排序 + JSON 导入导出，AI 贡献分类标记 |
 | 💰 AI 费用 | 自动记录调用量与每日/月度估算费用；可只读复用 CC Switch 模型价格，并查询 DeepSeek 官方余额 |
 | 🛡️ 可靠性 | 启动自动快照、手动备份与恢复、离线重试、trace_id 链路日志、API Key 钥匙串加密 |
+
+### v0.3.0 增强（2026-10-17）
+
+- 粉笔导入先保存题目、答案、公共资料与可靠原始解析，再后台分析；顶部“分析任务”可查看、暂停、继续或重试失败项。暂停等待当前题结束，不取消已经发出的模型请求。
+- 资料分析按完整资料组总用时判断效率，缺少用时不判超时；复习中心可查看新导入组的整体正确率与时间。粉笔难度系数保留原值，不猜测其刻度。
+- 复习中心统一按题量或预计时间选题，可导出题目卷、答案解析和连续阅读页；默认保留共同资料，不重复凑数。“看过解析”和“独立做对”分开记录。
+- 知识卡片采用 FSRS 安排下一次复习，按真实回忆选择忘记/困难/记住/轻松。历史复习记录保留，但不会伪造过去的 FSRS 状态。
+- 待确认与错题详情的阅读分栏可以拖动、键盘调整并记住比例。
+- AI 返回值增加结构、答案与截断检查；未来安排失败时保留原计划。节假日采用可核验调休日历，缺少新年份日历时保守安排。
+
+- Tauri 完整界面与共享业务迁移，独立题库、系统钥匙串加密、原生粉笔窗口和分页 PDF；不包含 Electron/Chromium，内置 Node 业务服务。
+- DeepSeek 模型清单支持清晰的故障提示和手填模型名，V4 推理预算适配与截断保护覆盖分类、复盘、计划和知识归纳。
+- 本机安装工具保留可恢复副本，不因更新安装包改写现有题库和 Vault。新旧两种桌面实现的配置与加密格式不同。
+
+105 项离线检查通过；已实测单报告粉笔导入、图表/公式、部分真实模型复盘及 PDF 分卷。多报告连续恢复、全部模型/余额接口、跨平台仍需进一步验证。完整边界见 [Tauri 验收记录](./tauri-app/README.md)。
 
 ## 🔄 学习闭环
 
@@ -30,14 +53,22 @@
 
 ## 🛠️ 技术栈
 
-Electron 33 · React 18 · TypeScript · Ant Design 5 · Zustand · better-sqlite3 · Sharp · OpenAI SDK · react-markdown + KaTeX · electron-builder
+Tauri 2 · Rust · macOS WKWebView · 内置 Node.js 24 业务服务 · React 18 · TypeScript · Ant Design 5 · Zustand · better-sqlite3 · Sharp · OpenAI SDK · react-markdown + KaTeX · ts-fsrs · Zod · react-resizable-panels。Electron 44 与 electron-builder 作为历史实现保留。
 
 ## 🚀 快速开始（开发）
 
 ```bash
+# Node.js >= 22.12，推荐 Node.js 24；首次安装需具备本机原生模块编译工具
 npm install
 npm run dev        # 开发模式
+npm run check      # 类型、离线测试和生产构建，不调用模型
 ```
+
+可选的模型质量评估见 [evals/README.md](./evals/README.md)，默认不允许付费调用，也不读取正式密钥。
+
+当前桌面入口与构建步骤见 [Tauri 桌面版](./tauri-app/README.md)。上面的根目录命令运行 Electron 历史实现；其包版本仍为 0.2.2，Tauri 的版本由 `tauri-app/` 单独管理。
+
+[tauri-lab/](./tauri-lab/README.md) 是早期独立技术验证，不是本次发布的完整版。历史决策见 [技术改进与验证报告](./docs/技术改进与Tauri验证-2026-10-15.md)，不代表当前安装状态。
 
 ## 🤖 AI 与费用说明
 
@@ -48,21 +79,36 @@ npm run dev        # 开发模式
 
 ## 📦 打包发布
 
+Tauri 当前版本：
+
+```bash
+cd tauri-app
+npm ci --ignore-scripts
+npm run prepare:runtime
+npm run typecheck
+npm run build
+```
+
+需要先安装根目录依赖、Node.js 24、Rust 与 macOS 开发工具。完整架构与构建说明见 [tauri-app/README.md](./tauri-app/README.md)。正式资源上传至 Release，不将构建缓存、数据库或内置运行时提交到 Git。
+
+Electron 历史构建：
+
 ```bash
 npm run dist       # 产物在 dist/（macOS arm64 dmg）
 ```
 
-> 签名说明：本项目**默认不签名**（macOS adhoc 签名，打包快）。本机自用直接运行；**换到其他电脑**首次打开若提示"无法验证开发者"，请**右键 → 打开**一次；若提示"已损坏"，在终端执行 `sudo xattr -dr com.apple.quarantine "/Applications/小乖的考公错题屋.app"`。若要对外无感分发，需 Apple Developer 证书 + 公证。
+签名说明：当前采用 macOS ad-hoc 本机签名，不是 Apple Developer 公证。下载后请先核对 Release 中的 SHA-256；若系统阻止打开，应核实来源，不要全局关闭系统安全保护。公开无感分发需要开发者证书与公证。
 
 ## 💾 数据存储位置
 
 | 数据 | 位置 |
 |------|------|
-| 结构化数据（错题/日志/复习记录） | `~/Library/Application Support/wrong-answer-app/data.db` |
-| 本地图片与 Markdown | `~/考公错题`（可在设置中修改） |
+| Tauri 结构化数据（错题/日志/复习记录） | `~/Library/Application Support/com.deca.wrong-answer.tauri/data.db` |
+| Tauri 新用户默认图片与 Markdown | 同上目录中的 `local/`（可在设置中修改；迁移用户以现有配置为准） |
+| Electron 历史数据 | `~/Library/Application Support/wrong-answer-app/data.db`；历史默认图片目录为 `~/考公错题` |
 | 笔记 / 知识卡片 | Obsidian Vault（设置中配置路径） |
 
-- API Key 使用 macOS 钥匙串（safeStorage）加密存储，日志不落明文
+- Tauri 通过系统钥匙串持有独立随机密钥，使用带认证加密保存业务凭据；Electron 使用 safeStorage。两者密文不可直接混用，日志不落明文。
 - 应用启动时自动创建数据库快照并保留最近 14 份，也可在“设置 → 备份与恢复”中手动备份或恢复指定版本
 
 ## 📖 使用建议

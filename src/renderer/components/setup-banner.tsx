@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { useSettingsStore } from '@/stores/settings'
 
 /**
- * 首次使用引导横幅：检测到 AI Key / Vault 未配置时提示，一键跳转设置页。
+ * AI 是分析必需配置；Obsidian 只是可选同步，不能提示成整个本地题库不可用。
  */
 export function SetupBanner() {
   const navigate = useNavigate()
@@ -18,19 +18,16 @@ export function SetupBanner() {
 
   if (!checked) return null
 
-  const missing: string[] = []
-  if (!config.vision_api_key && !config.ai_api_key) missing.push('AI 模型 API Key')
-  if (!config.obsidian_vault) missing.push('Obsidian Vault 路径')
-
-  if (missing.length === 0) return null
+  const missingAi = !config.vision_api_key && !config.ai_api_key
+  if (!missingAi) return null
 
   return (
     <Alert
       type="warning"
       showIcon
       style={{ marginBottom: 12 }}
-      message={`尚未配置：${missing.join('、')}`}
-      description="配置后才能使用 AI 自动分类与知识库写入功能。"
+      message="尚未配置 AI 模型 API Key"
+      description="配置后可使用 AI 分类与复盘。本地题库可正常使用；Obsidian 同步为可选功能。"
       action={
         <Button size="small" type="primary" onClick={() => navigate('/settings')}>
           去配置

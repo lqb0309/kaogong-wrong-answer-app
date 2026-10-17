@@ -6,6 +6,7 @@ directories:
 files:
   - out/**/*
   - package.json
+  - THIRD_PARTY_NOTICES.md
   - node_modules/**/*
 asarUnpack:
   - "**/*.node"

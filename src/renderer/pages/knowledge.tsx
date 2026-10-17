@@ -1,12 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Typography, Card, Row, Col, Statistic, Table, Tag, Button, App, Tabs, Empty, Space, Tooltip, Progress, Collapse, Modal, Input, Select, Tree, DatePicker } from 'antd'
-import {
-  BookOutlined, FileTextOutlined, ReloadOutlined, BulbOutlined,
-  FireOutlined, WarningOutlined, PlusCircleOutlined,
-  CopyOutlined, FolderOpenOutlined, ExportOutlined, EyeOutlined,
-  CalendarOutlined, ThunderboltOutlined, CheckOutlined
-} from '@ant-design/icons'
+import { FireOutlined, WarningOutlined, PlusCircleOutlined, CopyOutlined, EyeOutlined } from '@ant-design/icons'
+import { BookOutlined, FileTextOutlined, ReloadOutlined, BulbOutlined, FolderOpenOutlined, ExportOutlined, CalendarOutlined, ThunderboltOutlined, CheckOutlined } from '@/components/study-icons'
 import dayjs from 'dayjs'
 import { MarkdownRenderer } from '@/components/markdown-renderer'
 import { PageHeader } from '@/components/page-header'
@@ -85,7 +81,7 @@ export function KnowledgePage() {
   const handleMarkReview = useCallback(async (card: any, result: 'done' | 'wrong' | 'hard' | 'easy') => {
     const r = await window.api.markReview(card.file_path, result)
     if (r.success) {
-      const labels = { wrong: '忘记了，明天再次复习', hard: '较难，已缩短复习间隔', done: '记得，已安排下次复习', easy: '很熟，已延长复习间隔' }
+      const labels = { wrong: '忘记了，已安排重新学习', hard: '较难，已按回忆表现安排', done: '记得，已安排下次复习', easy: '很熟，已安排下次复习' }
       message.success(`${labels[result]}${r.dueDate ? `（${r.dueDate}）` : ''}`)
       if (r.completedPlanTask) message.success(`今日计划已自动完成：${r.completedPlanTask.title}`)
       setReviewCards((prev) => prev.filter((c: any) => c.file_path !== card.file_path))
@@ -435,13 +431,14 @@ export function KnowledgePage() {
       {/* Daily Review Queue（加权复习队列 · 学习闭环） */}
       {reviewCards.length > 0 && (
         <Card size="small" style={{ marginBottom: 16, border: '1px solid #ffd591', background: '#fffbe6' }}
-          title={<span><ThunderboltOutlined style={{ color: '#fa8c16' }} /> 今日复习队列（按薄弱程度加权推荐）</span>}
+          title={<span><ThunderboltOutlined style={{ color: '#fa8c16' }} /> 今日到期复习 · FSRS</span>}
           extra={
             <Space size={4}>
               <span style={{ fontSize: 12, color: '#999' }}>今日已复习 {reviewedToday.length} 张</span>
               <Button size="small" type="link" onClick={loadCards} icon={<ReloadOutlined />}>换一批</Button>
             </Space>
           }>
+          <Typography.Paragraph type="secondary">先不看正文，尝试回忆，再打开核对并反馈。仅阅读或导出不会标为掌握；反复忘记时先拆解易混点，不额外堆题。</Typography.Paragraph>
           <Row gutter={12}>
             {reviewCards.map((card: any, idx: number) => (
               <Col xs={24} sm={12} md={8} key={idx}>
@@ -618,6 +615,12 @@ export function KnowledgePage() {
         width={720}
         footer={[
           <Button key="close" onClick={() => setCardModalOpen(false)}>关闭</Button>,
+          <Button key="review" disabled={!cardQuestions.length} onClick={() => {
+            const first = cardQuestions[0]
+            const params = new URLSearchParams()
+            for (const key of ['level1', 'level2', 'level3']) if (first[key]) params.set(key, first[key])
+            setCardModalOpen(false); navigate(`/test-builder?${params.toString()}`)
+          }}>按此考点复习／导出</Button>,
           <Button key="obsidian" type="primary" icon={<ExportOutlined />} disabled={!cardModalPath}
             onClick={() => handleOpenCardInObsidian(cardModalPath)}>在 Obsidian 打开</Button>
         ]}

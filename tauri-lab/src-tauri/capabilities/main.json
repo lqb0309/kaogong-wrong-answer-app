@@ -1,0 +1,4 @@
+{
+  "identifier": "local-main", "windows": ["main"], "local": true,
+  "permissions": ["core:default", "allow-open-fenbi", "allow-capture-current", "allow-print-reader", "allow-load-demo", "allow-read-latest", "allow-export-pdf", "allow-smoke-finish"]
+}

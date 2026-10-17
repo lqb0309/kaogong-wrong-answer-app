@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.node.json",
+  "compilerOptions": { "noEmit": true, "rootDir": "..", "composite": false, "declaration": false },
+  "include": ["service/**/*.ts", "../src/main/**/*.ts"]
+}

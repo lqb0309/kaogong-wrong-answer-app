@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Modal, Button, Space } from 'antd'
-import { UndoOutlined, RotateRightOutlined, RotateLeftOutlined, PlusOutlined, MinusOutlined } from '@ant-design/icons'
+import { UndoOutlined, RotateRightOutlined, RotateLeftOutlined, MinusOutlined } from '@ant-design/icons'
+import { PlusOutlined } from '@/components/study-icons'
 
 interface Props {
   open: boolean; imagePath: string

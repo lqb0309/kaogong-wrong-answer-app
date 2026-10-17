@@ -1,10 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Typography, Card, Tree, Button, Space, Input, Modal, App, Row, Col, Tag as AntTag, List } from 'antd'
-import {
-  PlusOutlined, EditOutlined, DeleteOutlined,
-  ImportOutlined, ExportOutlined, ReloadOutlined,
-  StarOutlined
-} from '@ant-design/icons'
+import { ImportOutlined, StarOutlined } from '@ant-design/icons'
+import { PlusOutlined, EditOutlined, DeleteOutlined, ExportOutlined, ReloadOutlined } from '@/components/study-icons'
 import { useTagTreeStore } from '@/stores/tag-tree'
 import { PageHeader } from '@/components/page-header'
 

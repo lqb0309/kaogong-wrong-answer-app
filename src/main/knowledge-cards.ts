@@ -1,6 +1,8 @@
 import fs from 'fs-extra'
 import { join } from 'path'
-import { readConfig } from './config'
+import { resolveInside } from './path-safety'
+import crypto from 'crypto'
+import { readConfig, writeConfig } from './config'
 import { logger } from './logger'
 import { getDb } from './db'
 import { localDateKey } from './date-utils'
@@ -51,7 +53,9 @@ function getVaultRoot(): string {
 }
 
 function resolvePath(relativePath: string): string {
-  return join(getVaultRoot(), relativePath)
+  const root = getVaultRoot()
+  if (!root) throw new Error('未配置 Obsidian Vault')
+  return resolveInside(root, relativePath)
 }
 
 // ============ Scan Existing Cards ============
@@ -399,6 +403,8 @@ export function updateKnowledgeCard(input: UpdateCardInput): { success: boolean;
       const insertIdx = nextSectionIdx >= 0 ? nextSectionIdx : content.length
       const newLine = input.new_content.startsWith('-') ? `\n${input.new_content}` : `\n- ${input.new_content}`
       content = content.slice(0, insertIdx) + newLine + content.slice(insertIdx)
+    } else {
+      content += `\n\n${sectionHeader}\n${input.new_content}\n`
     }
 
     // Merge linked cards
@@ -424,7 +430,7 @@ export function updateKnowledgeCard(input: UpdateCardInput): { success: boolean;
     // Merge related questions
     if (input.new_related_questions.length > 0) {
       content = content.replace(
-        /^related_questions:\s*\n([\s\S]*?)(?=^\w+:|\Z)/m,
+        /^related_questions:\s*\n([\s\S]*?)(?=^\w+:|^---|\s*$)/m,
         (_match, existing) => {
           const existingQs = new Set(
             (existing as string).split('\n').filter((l: string) => l.trim()).map((l: string) => l.trim())
@@ -461,7 +467,8 @@ export function writeDailyNote(date: string, fullMarkdown: string): { success: b
   try {
     const dir = resolvePath('每日笔记')
     fs.ensureDirSync(dir)
-    const filePath = join(dir, `${date}.md`)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日期格式无效')
+    const filePath = resolvePath(`每日笔记/${date}.md`)
     fs.writeFileSync(filePath, fullMarkdown, 'utf-8')
     logger.info('knowledge', 'daily_note_written', `每日笔记已写入: 每日笔记/${date}.md`)
     return { success: true, fullPath: filePath }
@@ -580,28 +587,42 @@ export function writeInductionResults(
     mocUpdates: []
   }
 
-  // Write daily note
-  const dnResult = writeDailyNote(date, dailyNoteMarkdown)
-  result.dailyNote = { success: dnResult.success, path: dnResult.fullPath, error: dnResult.error }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('归纳日期无效')
+  if (![newCards, updatedCards, mocUpdates].every(Array.isArray)) throw new Error('归纳操作必须为数组')
+  const applyOnce = <T extends { success: boolean }>(kind: string, operation: unknown, work: () => T): T => {
+    const key = `induction_receipt:${date}:${crypto.createHash('sha256').update(JSON.stringify([kind, operation])).digest('hex')}`
+    const previous = readConfig(key)
+    if (previous) { try { return JSON.parse(previous) as T } catch { /* repair receipt */ } }
+    try {
+      const applied = work()
+      if (applied.success) writeConfig(key, JSON.stringify(applied))
+      return applied
+    } catch (error: any) { return { success: false, error: error.message } as unknown as T }
+  }
 
   // Write new cards
   for (const card of newCards) {
-    const r = writeKnowledgeCard(card)
+    const r = applyOnce('new', card, () => writeKnowledgeCard(card))
     result.newCards.push({ title: card.title, success: r.success, path: r.fullPath, error: r.error })
   }
 
   // Update existing cards
   for (const update of updatedCards) {
-    const r = updateKnowledgeCard(update)
+    const r = applyOnce('update', update, () => updateKnowledgeCard(update))
     result.updatedCards.push({ file: update.existing_file, success: r.success, error: r.error })
   }
 
   // Update MOCs
   for (const moc of mocUpdates) {
-    const r = updateMoc(moc)
+    const r = applyOnce('moc', moc, () => updateMoc(moc))
     result.mocUpdates.push({ file: moc.moc_file, success: r.success, error: r.error })
   }
 
+  // Publish the daily note last so a partial operation cannot look complete.
+  if ([...result.newCards, ...result.updatedCards, ...result.mocUpdates].every(item => item.success)) {
+    const written = applyOnce('daily', dailyNoteMarkdown, () => writeDailyNote(date, dailyNoteMarkdown))
+    result.dailyNote = { success: written.success, path: written.fullPath, error: written.error }
+  } else result.dailyNote.error = '部分知识卡片未写入，已保留成功操作，重试不会重复累计'
   return result
 }
 
