@@ -424,8 +424,9 @@ test('共享粉笔窗口同一时间只允许一个导航读取任务', async ()
   assert.deepEqual(await h.handlers.get('fenbi:syncToday')(), { success: true })
 })
 test('统计查询与新迁移在临时SQLite中语法正确', t => {
-  const { spawnSync } = require('node:child_process')
-  if (spawnSync('sqlite3', ['--version']).error) { t.skip('此平台未提供 SQLite CLI；其他测试正常运行'); return }
+  // Use Node 24's SQLite instead of a host CLI whose build may omit FTS5.
+  // This keeps the same schema and query assertions mandatory on clean CI.
+  const { DatabaseSync } = require('node:sqlite')
   const schema = []
   class FakeDatabase {
     pragma() {}
@@ -446,19 +447,17 @@ test('统计查询与新迁移在临时SQLite中语法正确', t => {
   const h = ipcHarness(db)
   h.handlers.get('questions:stats')()
   const sql = schema.join(';\n') + ';\n' + queries.map(query => 'EXPLAIN ' + query + ';').join('\n')
-  const checked = spawnSync('sqlite3', [':memory:'], { input: sql, encoding: 'utf8', maxBuffer: 5e6 })
-  assert.equal(checked.status, 0, checked.stderr)
+  const checked = new DatabaseSync(':memory:')
+  t.after(() => checked.close())
+  assert.doesNotThrow(() => checked.exec(sql))
   const fixtures = `
     INSERT INTO questions (id, image_url, level1, level2, confidence, status, error_count, error_type, created_at, confirmed_at) VALUES
     ('wrong', '', '数量关系', '计算', 1, 'confirmed', 2, '计算错误', '2026-08-01T00:00:00Z', '2026-10-05T18:30:00Z'),
     ('slow', '', '数量关系', '计算', 1, 'confirmed', 5, '正确但超时', '2026-08-01T00:00:00Z', '2026-10-05T18:30:00Z'),
     ('pending', '', '数量关系', '计算', 1, 'classified', 9, '计算错误', '2026-08-01T00:00:00Z', NULL);
   `
-  const evaluate = query => {
-    const output = spawnSync('sqlite3', ['-json', ':memory:'], { input: schema.join(';\n') + ';\n' + fixtures + query + ';', encoding: 'utf8' })
-    assert.equal(output.status, 0, output.stderr)
-    return JSON.parse(output.stdout || '[]')
-  }
+  checked.exec(fixtures)
+  const evaluate = query => checked.prepare(query).all().map(row => ({ ...row }))
   const topErrors = queries.find(query => query.includes('ORDER BY error_count DESC'))
   assert.deepEqual(evaluate(topErrors).map(row => row.id), ['wrong'])
   const errorDist = queries.find(query => query.includes('as err_level'))

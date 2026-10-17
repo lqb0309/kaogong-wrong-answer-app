@@ -17,20 +17,24 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Shared dependencies and checks
+      - name: Shared dependencies
         run: |
           npm ci
-          npm run typecheck
-          npm test
       - name: Rust toolchain
         run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Tauri dependencies
         working-directory: tauri-app
         run: npm ci --ignore-scripts
-      - name: Build private service and desktop app
+      - name: Prepare native Node service before migration tests
+        working-directory: tauri-app
+        run: npm run prepare:runtime
+      - name: Shared checks
+        run: |
+          npm run typecheck
+          npm test
+      - name: Build desktop app
         working-directory: tauri-app
         run: |
-          npm run prepare:runtime
           npm run typecheck
           npm run test:rust
           npm run build
